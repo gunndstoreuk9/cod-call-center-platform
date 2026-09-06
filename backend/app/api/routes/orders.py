@@ -1,3 +1,6 @@
+from pathlib import Path
+from functools import lru_cache
+import json
 import secrets
 from datetime import datetime
 from decimal import Decimal
@@ -122,6 +125,42 @@ def my_queue(
     return [order_to_dict(db, x) for x in q.order_by(Order.created_at.asc()).limit(min(limit, 200)).all()]
 
 
+
+@lru_cache(maxsize=1)
+def load_digylog_cities():
+    city_file = Path(__file__).resolve().parents[2] / "data" / "digylog_cities.json"
+
+    with city_file.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    return [
+        str(city).strip()
+        for city in data
+        if str(city).strip()
+    ]
+
+
+def canonical_digylog_city(value):
+    value = (value or "").strip()
+
+    if not value:
+        return None
+
+    cities = load_digylog_cities()
+    city_map = {city.casefold(): city for city in cities}
+
+    return city_map.get(value.casefold())
+
+
+@router.get("/cities")
+def list_digylog_cities(
+    user: User = Depends(
+        require_roles("OWNER", "ADMIN", "SUPERVISOR", "AGENT")
+    ),
+):
+    return {"cities": load_digylog_cities()}
+
+
 @router.get("/manual-meta")
 def agent_manual_order_meta(
     db: Session = Depends(get_db),
@@ -182,6 +221,14 @@ def create_manual_order(
     if not store or not product:
         raise HTTPException(400, "Invalid store/product combination")
 
+    city = canonical_digylog_city(payload.city)
+
+    if not city:
+        raise HTTPException(
+            400,
+            "Select a valid Digylog city"
+        )
+
     assigned_agent_id = payload.assigned_agent_id
 
     if user.role == "AGENT":
@@ -201,12 +248,12 @@ def create_manual_order(
     phone = normalize_phone(payload.phone, store.country)
     customer = db.query(Customer).filter(Customer.phone_e164 == phone).first()
     if not customer:
-        customer = Customer(name=payload.customer_name.strip(), phone_raw=payload.phone, phone_e164=phone, city=payload.city, address=payload.address)
+        customer = Customer(name=payload.customer_name.strip(), phone_raw=payload.phone, phone_e164=phone, city=city, address=payload.address)
         db.add(customer)
         db.flush()
     else:
         customer.name = payload.customer_name.strip() or customer.name
-        customer.city = payload.city or customer.city
+        customer.city = city
         customer.address = payload.address or customer.address
 
     qty = offer.quantity if offer else payload.quantity
@@ -241,7 +288,7 @@ def create_manual_order(
         source=payload.source.upper(),
         call_status=call_status,
         call_note=payload.call_note,
-        city=payload.city,
+        city=city,
         address=payload.address,
         assigned_at=utcnow() if assigned_agent_id else None,
     )

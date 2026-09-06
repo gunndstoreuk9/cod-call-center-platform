@@ -49,3 +49,78 @@ html[dir="rtl"] strong,
 html[dir="rtl"] .btn {
   font-family: "Tajawal", Arial, sans-serif;
 }
+
+/* Digylog searchable city selector */
+.city-select-field {
+  position: relative;
+}
+
+.city-select {
+  position: relative;
+}
+
+.city-select input {
+  padding-inline-end: 38px;
+}
+
+.city-selected-mark {
+  position: absolute;
+  inset-inline-end: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #16a34a;
+  font-weight: 800;
+  pointer-events: none;
+}
+
+.city-dropdown {
+  position: absolute;
+  z-index: 1000;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #dbe3ef;
+  border-radius: 14px;
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.16);
+  padding: 6px;
+}
+
+.city-option {
+  width: 100%;
+  display: block;
+  border: 0;
+  background: transparent;
+  color: #172033;
+  text-align: start;
+  padding: 11px 13px;
+  border-radius: 9px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.city-option:hover,
+.city-option.selected {
+  background: #eef5ff;
+  color: #1d4ed8;
+}
+
+.city-empty {
+  padding: 14px;
+  color: #64748b;
+  text-align: center;
+  font-size: 13px;
+}
+
+.city-help {
+  display: block;
+  margin-top: 5px;
+  color: #b45309;
+}
+
+html[dir="rtl"] .city-option {
+  text-align: right;
+}

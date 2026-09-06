@@ -5,6 +5,7 @@ import { api, money } from '../../../lib/api'
 import { useI18n } from '../../../lib/i18n'
 import Modal from '../../../components/Modal'
 import StatusBadge from '../../../components/StatusBadge'
+import CitySelect from '../../../components/CitySelect'
 
 const emptyManual = {
   product_id: '',
@@ -464,18 +465,17 @@ export default function WorkspacePage() {
                 />
               </div>
 
-              <div className="field">
-                <label>{t('City')}</label>
-                <input
-                  value={manual.city}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      city: e.target.value
-                    })
-                  }
-                />
-              </div>
+              <CitySelect
+                value={manual.city}
+                onChange={city =>
+                  setManual({
+                    ...manual,
+                    city
+                  })
+                }
+                label={t('City')}
+                placeholder={t('Type city name...')}
+              />
 
               <div className="field">
                 <label>{t('Quantity')}</label>
