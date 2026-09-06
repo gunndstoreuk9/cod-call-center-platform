@@ -7,7 +7,7 @@ const nextConfig = {
     return [
       {
         source: '/api/v1/:path*',
-        destination: `${process.env.BACKEND_ORIGIN}/api/v1/:path*`,
+        destination: 'https://codops.up.railway.app/api/v1/:path*',
       },
     ]
   },
