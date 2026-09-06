@@ -29,3 +29,23 @@ html[dir="rtl"] .nav-link.active{box-shadow:inset -3px 0 0 #3b82f6}html[dir="rtl
 @media(max-width:1100px){.shell{grid-template-columns:220px minmax(0,1fr)}.stats-grid{grid-template-columns:repeat(2,1fr)}.workspace-grid{grid-template-columns:1fr}.login-layout{width:min(820px,100%)}}
 @media(max-width:760px){.shell{display:block}.sidebar{height:auto;position:relative;padding:12px}.brand-wrap{padding-bottom:12px}.nav-caption{display:none}.sidebar nav{display:grid;grid-template-columns:repeat(3,1fr);gap:5px}.nav-link{justify-content:center;padding:8px 5px;font-size:10px}.nav-icon{display:none}.sidebar-user{margin-top:12px}.topbar{height:58px;padding:0 14px}.top-user{display:none}.main{padding:16px 12px 30px}.page-head{flex-direction:column}.stats-grid{grid-template-columns:1fr 1fr}.form-grid{grid-template-columns:1fr}.field.full{grid-column:auto}.action-grid{grid-template-columns:1fr 1fr}.table{min-width:720px}.login-layout{grid-template-columns:1fr}.login-brand-panel{display:none}.login-card{padding:36px 26px}.login-page{padding:14px}.login-language{top:15px;right:16px}.date-filter{max-width:100%}}
 @media(max-width:480px){.stats-grid{grid-template-columns:1fr}.sidebar nav{grid-template-columns:repeat(2,1fr)}.topbar .eyebrow{display:none}.page-head h1{font-size:23px}.main{padding-inline:10px}.action-grid{grid-template-columns:1fr}.toolbar input{min-width:100%;width:100%}.login-card{padding:32px 20px}}
+
+/* Arabic / RTL — Tajawal */
+html[dir="rtl"] body,
+html[dir="rtl"] button,
+html[dir="rtl"] input,
+html[dir="rtl"] select,
+html[dir="rtl"] textarea {
+  font-family: "Tajawal", Arial, sans-serif;
+}
+
+html[dir="rtl"] h1,
+html[dir="rtl"] h2,
+html[dir="rtl"] h3,
+html[dir="rtl"] h4,
+html[dir="rtl"] h5,
+html[dir="rtl"] h6,
+html[dir="rtl"] strong,
+html[dir="rtl"] .btn {
+  font-family: "Tajawal", Arial, sans-serif;
+}
