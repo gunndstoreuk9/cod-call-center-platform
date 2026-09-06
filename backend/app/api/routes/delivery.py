@@ -249,12 +249,10 @@ def health(
 
     # "Last webhook" must represent an actual Digylog status webhook,
     # not an outbound CREATE_ORDER event.
+    # Last webhook = most recent inbound Digylog webhook event.
     last_event = (
         db.query(DeliveryEvent)
-        .filter(
-            DeliveryEvent.integration_id == integration.id,
-            DeliveryEvent.event_type == "order-status-changed",
-        )
+        .filter(DeliveryEvent.integration_id == integration.id)
         .order_by(DeliveryEvent.received_at.desc())
         .first()
     )
