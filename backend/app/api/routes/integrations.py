@@ -296,6 +296,20 @@ async def digylog_webhook(
         body = await request.json()
     except Exception as exc:
         raise HTTPException(400, "Webhook body must be JSON") from exc
+
+    # Digylog webhook verification handshake.
+    # Digylog sends a key and expects the same key in the response.
+    verification_key = None
+    if isinstance(body, dict):
+        verification_key = body.get("key")
+
+    # Also support verification key sent as a query parameter.
+    if verification_key is None:
+        verification_key = request.query_params.get("key")
+
+    if verification_key is not None:
+        return {"key": verification_key}
+
     result = apply_webhook(db, row, body)
     db.commit()
     return result
