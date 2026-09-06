@@ -241,11 +241,36 @@ def dispatch_order(db: Session, integration: IntegrationConfig, order: Order) ->
 
 
 def apply_webhook(db: Session, integration: IntegrationConfig, body: dict) -> dict:
-    event_type = str((body or {}).get("type") or "unknown")
-    integration_event = IntegrationEvent(integration_id=integration.id, provider="DIGYLOG", direction="INBOUND", event_type=event_type, status="SUCCESS", payload=body)
-    db.add(integration_event)
+    raw_body = body or {}
 
-    payload = body.get("payload") or {}
+    # Digylog can send order status fields directly without
+    # wrapping them inside {"type": ..., "payload": {...}}.
+    wrapped_payload = raw_body.get("payload")
+    payload = wrapped_payload if isinstance(wrapped_payload, dict) else raw_body
+
+    event_type = str(raw_body.get("type") or "").strip()
+
+    # Detect Digylog "Order status changed" flat webhook payload.
+    if not event_type and isinstance(payload, dict):
+        if "idStatus" in payload and (
+            "num" in payload or
+            "tracking" in payload or
+            "traking" in payload
+        ):
+            event_type = "order-status-changed"
+
+    if not event_type:
+        event_type = "unknown"
+
+    integration_event = IntegrationEvent(
+        integration_id=integration.id,
+        provider="DIGYLOG",
+        direction="INBOUND",
+        event_type=event_type,
+        status="SUCCESS",
+        payload=body
+    )
+    db.add(integration_event)
     num = str(payload.get("num") or "").strip()
     tracking = str(payload.get("traking") or payload.get("tracking") or "").strip()
     raw_status = payload.get("idStatus")
