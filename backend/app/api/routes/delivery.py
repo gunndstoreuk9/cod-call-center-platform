@@ -226,13 +226,38 @@ def health(
     integration_id: str | None = None, db: Session = Depends(get_db),
     _=Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
-    iq = db.query(IntegrationConfig).filter(IntegrationConfig.provider == "DIGYLOG")
-    if integration_id: iq = iq.filter(IntegrationConfig.id == integration_id)
-    integration = iq.order_by(IntegrationConfig.created_at.asc()).first()
+    iq = db.query(IntegrationConfig).filter(
+        IntegrationConfig.provider == "DIGYLOG"
+    )
+
+    if integration_id:
+        integration = iq.filter(
+            IntegrationConfig.id == integration_id
+        ).first()
+    else:
+        # Health dashboard must use the CURRENT active Digylog connection,
+        # not the oldest historical integration.
+        integration = (
+            iq.filter(IntegrationConfig.is_active.is_(True))
+              .order_by(IntegrationConfig.created_at.desc())
+              .first()
+            or iq.order_by(IntegrationConfig.created_at.desc()).first()
+        )
+
     if not integration:
         return {"connected": False, "message": "No Digylog integration configured"}
-    last_event = (db.query(DeliveryEvent).filter(DeliveryEvent.integration_id == integration.id)
-                  .order_by(DeliveryEvent.received_at.desc()).first())
+
+    # "Last webhook" must represent an actual Digylog status webhook,
+    # not an outbound CREATE_ORDER event.
+    last_event = (
+        db.query(DeliveryEvent)
+        .filter(
+            DeliveryEvent.integration_id == integration.id,
+            DeliveryEvent.event_type == "order-status-changed",
+        )
+        .order_by(DeliveryEvent.received_at.desc())
+        .first()
+    )
     last_sync = (db.query(DeliverySyncRun).filter(DeliverySyncRun.integration_id == integration.id)
                  .order_by(DeliverySyncRun.started_at.desc()).first())
     failed = db.query(DeliveryShipment).filter(DeliveryShipment.integration_id == integration.id, DeliveryShipment.status == "FAILED").count()
