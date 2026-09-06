@@ -1,0 +1,1 @@
+export default function StatCard({label,value,note,tone='default'}){return <div className={`stat-card tone-${tone}`}><div className="stat-top"><span>{label}</span><i/></div><strong>{value}</strong>{note?<small>{note}</small>:<small className="placeholder-note">&nbsp;</small>}</div>}
