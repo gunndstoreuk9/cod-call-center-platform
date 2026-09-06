@@ -31,7 +31,19 @@ export default function Shell({ user, mode, children }) {
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand-wrap"><div className="brand-mark">C</div><div className="brand-copy"><strong>COD Ops</strong><small>{t('Operations Console')}</small></div></div>
+        <div className="brand-wrap">
+          <img
+            src="/codops-logo.png"
+            alt="COD OPS"
+            style={{
+              width: '170px',
+              maxWidth: '100%',
+              height: '64px',
+              objectFit: 'contain',
+              objectPosition: 'left center'
+            }}
+          />
+        </div>
         <div className="nav-caption">{mode==='agent'?t('Workspace'):t('Operations Console')}</div>
         <nav>
           {links.map(([href,label,icon]) => <Link key={href} href={href} className={pathname === href ? 'nav-link active' : 'nav-link'}><span className="nav-icon"><Icon name={icon}/></span><span>{t(label)}</span></Link>)}
