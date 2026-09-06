@@ -122,16 +122,78 @@ def my_queue(
     return [order_to_dict(db, x) for x in q.order_by(Order.created_at.asc()).limit(min(limit, 200)).all()]
 
 
+@router.get("/manual-meta")
+def agent_manual_order_meta(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("AGENT")),
+):
+    links = db.query(AgentProduct).filter(
+        AgentProduct.agent_id == user.id
+    ).all()
+
+    product_ids = [x.product_id for x in links]
+
+    if not product_ids:
+        return {"products": []}
+
+    products = db.query(Product).filter(
+        Product.id.in_(product_ids),
+        Product.status == "ACTIVE",
+    ).all()
+
+    result = []
+
+    for product in products:
+        offers = db.query(ProductOffer).filter(
+            ProductOffer.product_id == product.id,
+            ProductOffer.is_active.is_(True),
+        ).all()
+
+        result.append({
+            "id": product.id,
+            "store_id": product.store_id,
+            "name": product.name,
+            "sku": product.sku,
+            "selling_price": product.selling_price,
+            "currency": product.currency,
+            "default_qty": product.default_qty,
+            "offers": [
+                {
+                    "id": offer.id,
+                    "name": offer.name,
+                    "quantity": offer.quantity,
+                    "price": offer.price,
+                }
+                for offer in offers
+            ],
+        })
+
+    return {"products": result}
+
+
 @router.post("/manual", response_model=OrderOut)
 def create_manual_order(
     payload: ManualOrderCreate,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
+    user: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR", "AGENT")),
 ):
     store = db.query(Store).filter(Store.id == payload.store_id).first()
     product = db.query(Product).filter(Product.id == payload.product_id, Product.store_id == payload.store_id).first()
     if not store or not product:
         raise HTTPException(400, "Invalid store/product combination")
+
+    assigned_agent_id = payload.assigned_agent_id
+
+    if user.role == "AGENT":
+        allowed_product = db.query(AgentProduct).filter(
+            AgentProduct.agent_id == user.id,
+            AgentProduct.product_id == product.id,
+        ).first()
+
+        if not allowed_product:
+            raise HTTPException(403, "You are not enabled for this product")
+
+        assigned_agent_id = user.id
     offer = db.query(ProductOffer).filter(ProductOffer.id == payload.offer_id, ProductOffer.product_id == product.id, ProductOffer.is_active.is_(True)).first() if payload.offer_id else None
     if payload.offer_id and not offer:
         raise HTTPException(400, "Invalid product offer")
@@ -148,17 +210,21 @@ def create_manual_order(
         customer.address = payload.address or customer.address
 
     qty = offer.quantity if offer else payload.quantity
-    unit_price = Decimal(payload.unit_price) if payload.unit_price is not None else (Decimal(offer.price) / offer.quantity if offer else Decimal(product.selling_price))
-    total = Decimal(payload.total_price) if payload.total_price is not None else (Decimal(offer.price) if offer else unit_price * qty)
-    if payload.assigned_agent_id:
-        agent = db.query(User).filter(User.id == payload.assigned_agent_id, User.role == "AGENT", User.is_active.is_(True)).first()
+    if user.role == "AGENT":
+        unit_price = Decimal(offer.price) / offer.quantity if offer else Decimal(product.selling_price)
+        total = Decimal(offer.price) if offer else unit_price * qty
+    else:
+        unit_price = Decimal(payload.unit_price) if payload.unit_price is not None else (Decimal(offer.price) / offer.quantity if offer else Decimal(product.selling_price))
+        total = Decimal(payload.total_price) if payload.total_price is not None else (Decimal(offer.price) if offer else unit_price * qty)
+    if assigned_agent_id:
+        agent = db.query(User).filter(User.id == assigned_agent_id, User.role == "AGENT", User.is_active.is_(True)).first()
         if not agent:
             raise HTTPException(400, "Invalid agent")
         allowed = db.query(AgentProduct).filter(AgentProduct.agent_id == agent.id, AgentProduct.product_id == product.id).first()
         if not allowed:
             raise HTTPException(400, "Agent is not enabled for this product")
 
-    call_status = payload.call_status.upper()
+    call_status = "NEW" if user.role == "AGENT" else payload.call_status.upper()
     if call_status not in CALL_STATUSES:
         raise HTTPException(400, "Invalid call status")
     row = Order(
@@ -167,7 +233,7 @@ def create_manual_order(
         product_id=product.id,
         offer_id=offer.id if offer else None,
         customer_id=customer.id,
-        assigned_agent_id=payload.assigned_agent_id,
+        assigned_agent_id=assigned_agent_id,
         quantity=qty,
         unit_price=unit_price,
         total_price=total,
@@ -177,12 +243,12 @@ def create_manual_order(
         call_note=payload.call_note,
         city=payload.city,
         address=payload.address,
-        assigned_at=utcnow() if payload.assigned_agent_id else None,
+        assigned_at=utcnow() if assigned_agent_id else None,
     )
     db.add(row)
     db.flush()
-    if payload.assigned_agent_id:
-        db.add(OrderAssignment(order_id=row.id, agent_id=payload.assigned_agent_id, assigned_by_user_id=user.id, assignment_type="MANUAL"))
+    if assigned_agent_id:
+        db.add(OrderAssignment(order_id=row.id, agent_id=assigned_agent_id, assigned_by_user_id=user.id, assignment_type="MANUAL"))
     apply_status_side_effects(row, previous_call=None)
     reconcile_confirmation_payout(db, row)
     log_action(db, user_id=user.id, action="ORDER_MANUAL_CREATED", entity_type="ORDER", entity_id=row.id, after={"order_number": row.order_number, "product_id": row.product_id, "total": str(row.total_price)})
