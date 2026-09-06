@@ -35,6 +35,19 @@ export default function WorkspacePage() {
   const [manual, setManual] = useState(emptyManual)
   const [savingManual, setSavingManual] = useState(false)
 
+  const [editOpen, setEditOpen] = useState(false)
+  const [savingEdit, setSavingEdit] = useState(false)
+  const [editForm, setEditForm] = useState({
+    customer_name: '',
+    phone: '',
+    city: '',
+    address: '',
+    quantity: 1,
+    unit_price: '',
+    total_price: '',
+    call_note: ''
+  })
+
   const load = () =>
     api(`/orders/my-queue?bucket=${bucket}`)
       .then(rows => {
@@ -148,6 +161,98 @@ export default function WorkspacePage() {
       setSavingManual(false)
     }
   }
+
+  const openEditOrder = () => {
+    if (!selected) return
+
+    setError('')
+
+    setEditForm({
+      customer_name: selected.customer_name || '',
+      phone: selected.customer_phone || '',
+      city: selected.city || '',
+      address: selected.address || '',
+      quantity: Number(selected.quantity || 1),
+      unit_price: selected.unit_price ?? '',
+      total_price: selected.total_price ?? '',
+      call_note: selected.call_note || ''
+    })
+
+    setEditOpen(true)
+  }
+
+  const changeEditQuantity = value => {
+    const qty = value
+
+    setEditForm(f => ({
+      ...f,
+      quantity: qty,
+      total_price:
+        qty !== '' && f.unit_price !== ''
+          ? (Number(qty) * Number(f.unit_price)).toFixed(2)
+          : f.total_price
+    }))
+  }
+
+  const changeEditUnitPrice = value => {
+    const unit = value
+
+    setEditForm(f => ({
+      ...f,
+      unit_price: unit,
+      total_price:
+        unit !== '' && f.quantity !== ''
+          ? (Number(unit) * Number(f.quantity)).toFixed(2)
+          : f.total_price
+    }))
+  }
+
+  const saveEditOrder = async e => {
+    e.preventDefault()
+
+    if (!selected) return
+
+    if (!editForm.city) {
+      setError('Select a Digylog city.')
+      return
+    }
+
+    setSavingEdit(true)
+    setError('')
+
+    try {
+      await api(`/orders/${selected.id}`, {
+        method: 'PATCH',
+        body: {
+          customer_name: editForm.customer_name.trim(),
+          phone: editForm.phone.trim(),
+          city: editForm.city,
+          address: editForm.address,
+          quantity: Number(editForm.quantity),
+          unit_price: Number(editForm.unit_price),
+          total_price: Number(editForm.total_price),
+          call_note: editForm.call_note
+        }
+      })
+
+      setEditOpen(false)
+      await load()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSavingEdit(false)
+    }
+  }
+
+  const canEditSelected =
+    selected &&
+    !selected.delivery_tracking &&
+    ![
+      'DISPATCHED',
+      'IN_TRANSIT',
+      'OUT_FOR_DELIVERY',
+      'DELIVERED'
+    ].includes(selected.delivery_status)
 
   const outcome = async status => {
     if (!selected) return
@@ -311,6 +416,15 @@ export default function WorkspacePage() {
                   flexWrap: 'wrap'
                 }}
               >
+                {canEditSelected && (
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={openEditOrder}
+                  >
+                    {t('Edit Order')}
+                  </button>
+                )}
                 <a
                   className="btn secondary"
                   href={`tel:${selected.customer_phone}`}
@@ -558,6 +672,149 @@ export default function WorkspacePage() {
           </form>
         )}
       </Modal>
+
+      <Modal
+        open={editOpen}
+        title={t('Edit Order')}
+        onClose={() => setEditOpen(false)}
+        wide
+      >
+        <form onSubmit={saveEditOrder}>
+          <div className="form-grid">
+
+            <div className="field">
+              <label>{t('Customer Name')}</label>
+              <input
+                required
+                value={editForm.customer_name}
+                onChange={e =>
+                  setEditForm({
+                    ...editForm,
+                    customer_name: e.target.value
+                  })
+                }
+              />
+            </div>
+
+            <div className="field">
+              <label>{t('Phone')}</label>
+              <input
+                required
+                value={editForm.phone}
+                onChange={e =>
+                  setEditForm({
+                    ...editForm,
+                    phone: e.target.value
+                  })
+                }
+              />
+            </div>
+
+            <CitySelect
+              value={editForm.city}
+              onChange={city =>
+                setEditForm({
+                  ...editForm,
+                  city
+                })
+              }
+              label={t('City')}
+              placeholder={t('Type city name...')}
+            />
+
+            <div className="field">
+              <label>{t('Quantity')}</label>
+              <input
+                type="number"
+                min="1"
+                required
+                value={editForm.quantity}
+                onChange={e =>
+                  changeEditQuantity(e.target.value)
+                }
+              />
+            </div>
+
+            <div className="field">
+              <label>{t('Unit Price')}</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                required
+                value={editForm.unit_price}
+                onChange={e =>
+                  changeEditUnitPrice(e.target.value)
+                }
+              />
+            </div>
+
+            <div className="field">
+              <label>{t('Total Price')}</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                required
+                value={editForm.total_price}
+                onChange={e =>
+                  setEditForm({
+                    ...editForm,
+                    total_price: e.target.value
+                  })
+                }
+              />
+            </div>
+
+            <div className="field full">
+              <label>{t('Address')}</label>
+              <textarea
+                value={editForm.address}
+                onChange={e =>
+                  setEditForm({
+                    ...editForm,
+                    address: e.target.value
+                  })
+                }
+              />
+            </div>
+
+            <div className="field full">
+              <label>{t('Note')}</label>
+              <textarea
+                value={editForm.call_note}
+                onChange={e =>
+                  setEditForm({
+                    ...editForm,
+                    call_note: e.target.value
+                  })
+                }
+              />
+            </div>
+
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setEditOpen(false)}
+            >
+              {t('Cancel')}
+            </button>
+
+            <button
+              className="btn success"
+              disabled={savingEdit}
+            >
+              {savingEdit
+                ? t('Saving...')
+                : t('Save Changes')}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
 
       <Modal
         open={cbOpen}

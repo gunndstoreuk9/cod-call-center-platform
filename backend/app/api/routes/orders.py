@@ -321,50 +321,341 @@ def update_order(
     user: User = Depends(current_user),
 ):
     row = db.query(Order).filter(Order.id == order_id).first()
+
     if not row:
         raise HTTPException(404, "Order not found")
+
     assert_order_access(row, user)
+
     updates = payload.model_dump(exclude_unset=True)
-    if user.role == "AGENT" and "assigned_agent_id" in updates and updates["assigned_agent_id"] != user.id:
-        raise HTTPException(403, "Agents cannot reassign orders")
+
+    customer_name_set = "customer_name" in updates
+    phone_set = "phone" in updates
+
+    customer_name = updates.pop("customer_name", None)
+    phone_raw = updates.pop("phone", None)
+
+    # ----------------------------------------------
+    # Agent permissions
+    # ----------------------------------------------
+    if user.role == "AGENT":
+        if (
+            "assigned_agent_id" in updates
+            and updates["assigned_agent_id"] != user.id
+        ):
+            raise HTTPException(
+                403,
+                "Agents cannot reassign orders"
+            )
+
+        if "delivery_status" in updates:
+            raise HTTPException(
+                403,
+                "Agents cannot change delivery status"
+            )
+
+        locked_delivery_statuses = {
+            "DISPATCHED",
+            "IN_TRANSIT",
+            "OUT_FOR_DELIVERY",
+            "DELIVERED",
+        }
+
+        if (
+            row.delivery_status in locked_delivery_statuses
+            or row.delivery_tracking
+        ):
+            raise HTTPException(
+                409,
+                "Order was already sent to delivery and can no longer be edited by an agent"
+            )
+
+    # ----------------------------------------------
+    # Validate statuses
+    # ----------------------------------------------
     if "call_status" in updates and updates["call_status"]:
         updates["call_status"] = updates["call_status"].upper()
+
         if updates["call_status"] not in CALL_STATUSES:
-            raise HTTPException(400, "Invalid call status")
+            raise HTTPException(
+                400,
+                "Invalid call status"
+            )
+
     if "delivery_status" in updates and updates["delivery_status"]:
         updates["delivery_status"] = updates["delivery_status"].upper()
-        if updates["delivery_status"] not in DELIVERY_STATUSES:
-            raise HTTPException(400, "Invalid delivery status")
 
+        if updates["delivery_status"] not in DELIVERY_STATUSES:
+            raise HTTPException(
+                400,
+                "Invalid delivery status"
+            )
+
+    # ----------------------------------------------
+    # Customer + store
+    # ----------------------------------------------
+    customer = db.query(Customer).filter(
+        Customer.id == row.customer_id
+    ).first()
+
+    store = db.query(Store).filter(
+        Store.id == row.store_id
+    ).first()
+
+    if not customer:
+        raise HTTPException(
+            400,
+            "Customer record not found"
+        )
+
+    if not store:
+        raise HTTPException(
+            400,
+            "Store record not found"
+        )
+
+    before = {
+        "call_status": row.call_status,
+        "delivery_status": row.delivery_status,
+        "assigned_agent_id": row.assigned_agent_id,
+        "customer_name": customer.name,
+        "customer_phone": customer.phone_e164,
+        "quantity": row.quantity,
+        "unit_price": str(row.unit_price),
+        "total_price": str(row.total_price),
+        "city": row.city,
+        "address": row.address,
+        "call_note": row.call_note,
+    }
+
+    # ----------------------------------------------
+    # Customer name
+    # ----------------------------------------------
+    if customer_name_set:
+        name = (customer_name or "").strip()
+
+        if not name:
+            raise HTTPException(
+                400,
+                "Customer name is required"
+            )
+
+        customer.name = name
+
+    # ----------------------------------------------
+    # Customer phone
+    # ----------------------------------------------
+    if phone_set:
+        raw_phone = (phone_raw or "").strip()
+
+        if not raw_phone:
+            raise HTTPException(
+                400,
+                "Phone number is required"
+            )
+
+        normalized = normalize_phone(
+            raw_phone,
+            store.country
+        )
+
+        duplicate = db.query(Customer).filter(
+            Customer.phone_e164 == normalized,
+            Customer.id != customer.id,
+        ).first()
+
+        if duplicate:
+            raise HTTPException(
+                400,
+                "This phone number already belongs to another customer"
+            )
+
+        customer.phone_raw = raw_phone
+        customer.phone_e164 = normalized
+
+    # ----------------------------------------------
+    # Digylog City validation
+    # ----------------------------------------------
+    if "city" in updates:
+        city = canonical_digylog_city(
+            updates.get("city")
+        )
+
+        if not city:
+            raise HTTPException(
+                400,
+                "Select a valid Digylog city"
+            )
+
+        updates["city"] = city
+        customer.city = city
+
+    # ----------------------------------------------
+    # Address sync
+    # ----------------------------------------------
+    if "address" in updates:
+        customer.address = updates.get("address")
+
+    # ----------------------------------------------
+    # Price / quantity validation
+    # ----------------------------------------------
+    if "quantity" in updates:
+        if updates["quantity"] is None or updates["quantity"] < 1:
+            raise HTTPException(
+                400,
+                "Quantity must be at least 1"
+            )
+
+    if "unit_price" in updates:
+        if updates["unit_price"] is None or updates["unit_price"] < 0:
+            raise HTTPException(
+                400,
+                "Invalid unit price"
+            )
+
+    if "total_price" in updates:
+        if updates["total_price"] is None or updates["total_price"] < 0:
+            raise HTTPException(
+                400,
+                "Invalid total price"
+            )
+
+    # Automatically recalculate total when qty/unit price changes
+    # unless total_price was manually supplied.
+    if (
+        ("quantity" in updates or "unit_price" in updates)
+        and "total_price" not in updates
+    ):
+        final_qty = updates.get(
+            "quantity",
+            row.quantity
+        )
+
+        final_unit = updates.get(
+            "unit_price",
+            row.unit_price
+        )
+
+        updates["total_price"] = (
+            Decimal(final_unit) * final_qty
+        )
+
+    # ----------------------------------------------
+    # Assignment security
+    # ----------------------------------------------
+    if (
+        user.role == "AGENT"
+        and "assigned_agent_id" in updates
+    ):
+        updates.pop("assigned_agent_id", None)
+
+    # ----------------------------------------------
+    # Remember previous statuses / agent
+    # ----------------------------------------------
     previous_call = row.call_status
     previous_delivery = row.delivery_status
     previous_agent = row.assigned_agent_id
-    before = {"call_status": previous_call, "delivery_status": previous_delivery, "assigned_agent_id": previous_agent, "total_price": str(row.total_price)}
+
+    # ----------------------------------------------
+    # Apply order fields
+    # ----------------------------------------------
     for key, value in updates.items():
         setattr(row, key, value)
+
+    # ----------------------------------------------
+    # Assignment history
+    # ----------------------------------------------
     if row.assigned_agent_id != previous_agent:
-        row.assigned_at = utcnow() if row.assigned_agent_id else None
+        row.assigned_at = (
+            utcnow()
+            if row.assigned_agent_id
+            else None
+        )
+
         if previous_agent:
-            active_assignment = db.query(OrderAssignment).filter(OrderAssignment.order_id == row.id, OrderAssignment.agent_id == previous_agent, OrderAssignment.released_at.is_(None)).order_by(OrderAssignment.assigned_at.desc()).first()
+            active_assignment = (
+                db.query(OrderAssignment)
+                .filter(
+                    OrderAssignment.order_id == row.id,
+                    OrderAssignment.agent_id == previous_agent,
+                    OrderAssignment.released_at.is_(None),
+                )
+                .order_by(
+                    OrderAssignment.assigned_at.desc()
+                )
+                .first()
+            )
+
             if active_assignment:
                 active_assignment.released_at = utcnow()
-        if row.assigned_agent_id:
-            db.add(OrderAssignment(order_id=row.id, agent_id=row.assigned_agent_id, assigned_by_user_id=user.id, assignment_type="REASSIGNED"))
 
-    apply_status_side_effects(row, previous_call, previous_delivery)
-    if row.call_status != previous_call or row.delivery_status != previous_delivery:
-        db.add(OrderStatusHistory(
-            order_id=row.id,
-            from_call_status=previous_call,
-            to_call_status=row.call_status,
-            from_delivery_status=previous_delivery,
-            to_delivery_status=row.delivery_status,
-            changed_by_user_id=user.id,
-        ))
-    reconcile_confirmation_payout(db, row)
-    log_action(db, user_id=user.id, action="ORDER_UPDATED", entity_type="ORDER", entity_id=row.id, before=before, after={"call_status": row.call_status, "delivery_status": row.delivery_status, "assigned_agent_id": row.assigned_agent_id, "total_price": str(row.total_price)})
+        if row.assigned_agent_id:
+            db.add(
+                OrderAssignment(
+                    order_id=row.id,
+                    agent_id=row.assigned_agent_id,
+                    assigned_by_user_id=user.id,
+                    assignment_type="REASSIGNED",
+                )
+            )
+
+    # ----------------------------------------------
+    # Existing status side effects
+    # ----------------------------------------------
+    apply_status_side_effects(
+        row,
+        previous_call,
+        previous_delivery
+    )
+
+    if (
+        row.call_status != previous_call
+        or row.delivery_status != previous_delivery
+    ):
+        db.add(
+            OrderStatusHistory(
+                order_id=row.id,
+                from_call_status=previous_call,
+                to_call_status=row.call_status,
+                from_delivery_status=previous_delivery,
+                to_delivery_status=row.delivery_status,
+                changed_by_user_id=user.id,
+            )
+        )
+
+    # Keep commission / payout correct
+    reconcile_confirmation_payout(
+        db,
+        row
+    )
+
+    after = {
+        "call_status": row.call_status,
+        "delivery_status": row.delivery_status,
+        "assigned_agent_id": row.assigned_agent_id,
+        "customer_name": customer.name,
+        "customer_phone": customer.phone_e164,
+        "quantity": row.quantity,
+        "unit_price": str(row.unit_price),
+        "total_price": str(row.total_price),
+        "city": row.city,
+        "address": row.address,
+        "call_note": row.call_note,
+    }
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="ORDER_UPDATED",
+        entity_type="ORDER",
+        entity_id=row.id,
+        before=before,
+        after=after,
+    )
+
     db.commit()
     db.refresh(row)
+
     return order_to_dict(db, row)
 
 

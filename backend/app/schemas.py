@@ -160,6 +160,8 @@ class ManualOrderCreate(BaseModel):
 
 
 class OrderUpdate(BaseModel):
+    customer_name: str | None = None
+    phone: str | None = None
     assigned_agent_id: str | None = None
     quantity: int | None = Field(default=None, ge=1)
     unit_price: Decimal | None = Field(default=None, ge=0)
