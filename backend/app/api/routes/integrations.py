@@ -310,6 +310,17 @@ async def digylog_webhook(
     if verification_key is not None:
         return {"key": verification_key}
 
+    # Temporary Digylog payload-shape diagnostic.
+    # Logs field names only — no customer values.
+    if isinstance(body, dict):
+        print("DIGYLOG_WEBHOOK_KEYS:", sorted(body.keys()))
+        for key, value in body.items():
+            if isinstance(value, dict):
+                print(
+                    f"DIGYLOG_WEBHOOK_NESTED_KEYS[{key}]:",
+                    sorted(value.keys())
+                )
+
     result = apply_webhook(db, row, body)
     db.commit()
     return result
