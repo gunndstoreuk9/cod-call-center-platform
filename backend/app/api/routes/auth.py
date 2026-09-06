@@ -22,7 +22,7 @@ def login(payload: LoginRequest, response: Response, db: Session = Depends(get_d
         max_age=settings.session_hours * 3600,
         httponly=True,
         secure=settings.cookie_secure,
-        samesite="lax",
+        samesite="none",
         path="/",
     )
     return user
