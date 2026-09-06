@@ -22,6 +22,7 @@ export default function WorkspacePage() {
   const { t, status: statusText } = useI18n()
 
   const [bucket, setBucket] = useState('NEW')
+  const [blacklistCount, setBlacklistCount] = useState(0)
   const [orders, setOrders] = useState([])
   const [selected, setSelected] = useState(null)
   const [error, setError] = useState('')
@@ -48,6 +49,19 @@ export default function WorkspacePage() {
     call_note: ''
   })
 
+  const loadBlacklistCount = async () => {
+    try {
+      const rows = await api(
+        '/orders/my-queue?bucket=BLACKLIST&limit=200'
+      )
+
+      setBlacklistCount(rows.length)
+      return rows
+    } catch {
+      return []
+    }
+  }
+
   const load = () =>
     api(`/orders/my-queue?bucket=${bucket}`)
       .then(rows => {
@@ -58,6 +72,7 @@ export default function WorkspacePage() {
 
   useEffect(() => {
     load()
+    loadBlacklistCount()
   }, [bucket])
 
   const loadManualMeta = async () => {
@@ -300,13 +315,46 @@ export default function WorkspacePage() {
     setError('')
 
     try {
-      const r = await api(`/integrations/digylog/dispatch/${selected.id}`, {
-        method: 'POST'
-      })
+      const r = await api(
+        `/integrations/digylog/dispatch/${selected.id}`,
+        {
+          method: 'POST'
+        }
+      )
 
-      alert(`${t('Sent to Digylog. Tracking:')} ${r.tracking_number || 'created'}`)
+      alert(
+        `${t('Sent to Digylog. Tracking:')} ${
+          r.tracking_number || 'created'
+        }`
+      )
+
+      await loadBlacklistCount()
       await load()
     } catch (e) {
+      /*
+       * Do NOT classify every Digylog error as blacklist.
+       * Backend is responsible for that.
+       *
+       * After a failure we reload the BLACKLIST queue and verify
+       * whether this exact order was actually moved there.
+       */
+      const blacklistedRows = await loadBlacklistCount()
+
+      const becameBlacklisted = blacklistedRows.some(
+        row => row.id === selected.id
+      )
+
+      if (becameBlacklisted) {
+        setError(
+          t(
+            'Digylog rejected this phone number because it is blacklisted. Edit the phone or customer information, then retry.'
+          )
+        )
+
+        setBucket('BLACKLIST')
+        return
+      }
+
       setError(e.message)
     }
   }
@@ -325,13 +373,34 @@ export default function WorkspacePage() {
           </button>
 
           <div className="tabs">
-            {['NEW', 'FOLLOW_UP', 'CONFIRMED', 'ALL'].map(x => (
+            {['NEW', 'FOLLOW_UP', 'CONFIRMED', 'BLACKLIST', 'ALL'].map(x => (
               <button
                 key={x}
                 className={bucket === x ? 'tab active' : 'tab'}
                 onClick={() => setBucket(x)}
               >
-                {statusText(x)}
+                <span>{statusText(x)}</span>
+
+            {x === 'BLACKLIST' && blacklistCount > 0 && (
+              <span
+                style={{
+                  marginInlineStart: 6,
+                  minWidth: 20,
+                  height: 20,
+                  padding: '0 6px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  borderRadius: 999,
+                  background: '#dc2626',
+                  color: '#fff',
+                  fontSize: 11,
+                  fontWeight: 800
+                }}
+              >
+                {blacklistCount}
+              </span>
+            )}
               </button>
             ))}
           </div>
@@ -345,6 +414,62 @@ export default function WorkspacePage() {
           {selected ? (
             <>
               <StatusBadge value={selected.call_status} />
+
+            {selected.call_status === 'BLACKLIST' && (
+              <div
+                style={{
+                  marginTop: 14,
+                  marginBottom: 14,
+                  padding: '12px 14px',
+                  borderRadius: 12,
+                  border: '1px solid #fecaca',
+                  background: '#fef2f2',
+                  color: '#b91c1c'
+                }}
+              >
+                <div
+                  style={{
+                    fontWeight: 800,
+                    marginBottom: 4
+                  }}
+                >
+                  ⚠ {t('Digylog Blacklist')}
+                </div>
+
+                <div
+                  style={{
+                    fontSize: 13,
+                    lineHeight: 1.55
+                  }}
+                >
+                  {t(
+                    'Digylog rejected this phone number and the order was moved to Blacklist.'
+                  )}
+                </div>
+
+                <div
+                  style={{
+                    marginTop: 6,
+                    fontSize: 13,
+                    fontWeight: 800
+                  }}
+                  dir="ltr"
+                >
+                  {selected.customer_phone}
+                </div>
+
+                <div
+                  style={{
+                    marginTop: 5,
+                    fontSize: 12
+                  }}
+                >
+                  {t(
+                    'Edit the customer information, then retry sending to Digylog.'
+                  )}
+                </div>
+              </div>
+            )}
 
               <h2>{selected.customer_name}</h2>
 
@@ -441,7 +566,7 @@ export default function WorkspacePage() {
                   WhatsApp
                 </a>
 
-                {selected.call_status === 'CONFIRMED' &&
+                {['CONFIRMED', 'BLACKLIST'].includes(selected.call_status) &&
                   ![
                     'DISPATCHED',
                     'IN_TRANSIT',
@@ -452,7 +577,9 @@ export default function WorkspacePage() {
                       className="btn warning"
                       onClick={dispatchDigylog}
                     >
-                      {t('Send Digylog')}
+                      {selected.call_status === 'BLACKLIST'
+                  ? t('Retry Send Digylog')
+                  : t('Send Digylog')}
                     </button>
                   )}
 

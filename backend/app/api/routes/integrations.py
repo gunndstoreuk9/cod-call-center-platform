@@ -301,6 +301,72 @@ async def digylog_webhook(
     return result
 
 
+
+def _is_digylog_blacklist_error(message: str) -> bool:
+    text = (message or "").casefold()
+
+    blacklist_markers = (
+        "blacklist",
+        "blacklisted",
+        "black list",
+        "liste noire",
+        "القائمة السوداء",
+        "لائحة سوداء",
+    )
+
+    return any(marker in text for marker in blacklist_markers)
+
+
+def _raise_digylog_dispatch_error(
+    db: Session,
+    order: Order,
+    user: User,
+    exc: Exception,
+):
+    message = str(exc)
+
+    if _is_digylog_blacklist_error(message):
+        previous_call_status = order.call_status
+
+        order.call_status = "BLACKLIST"
+
+        # A blacklisted order is no longer an accepted confirmation
+        # until the agent corrects it and Digylog accepts it.
+        from app.services.payouts import reconcile_confirmation_payout
+        reconcile_confirmation_payout(db, order)
+
+        log_action(
+            db,
+            user_id=user.id,
+            action="ORDER_DIGYLOG_BLACKLISTED",
+            entity_type="ORDER",
+            entity_id=order.id,
+            before={
+                "call_status": previous_call_status,
+            },
+            after={
+                "call_status": "BLACKLIST",
+                "digylog_error": message[:500],
+            },
+        )
+
+        # Also preserves FAILED Digylog shipment/event
+        db.commit()
+
+        raise HTTPException(
+            409,
+            f"DIGYLOG_BLACKLIST: {message}"
+        ) from exc
+
+    # Normal Digylog errors are NOT blacklist
+    db.commit()
+
+    raise HTTPException(
+        502,
+        message
+    ) from exc
+
+
 @router.post("/digylog/{integration_id}/dispatch/{order_id}")
 def dispatch_to_digylog(
     integration_id: str,
@@ -322,13 +388,23 @@ def dispatch_to_digylog(
         raise HTTPException(400, "This Digylog integration is linked to a different store")
     try:
         shipment = dispatch_order(db, row, order)
+
+        if order.call_status == "BLACKLIST":
+            order.call_status = "CONFIRMED"
+
+            from app.services.payouts import reconcile_confirmation_payout
+            reconcile_confirmation_payout(db, order)
         log_action(db, user_id=user.id, action="ORDER_DISPATCHED_DIGYLOG", entity_type="ORDER", entity_id=order.id, after={"integration_id": row.id, "tracking": shipment.tracking_number})
         db.commit()
         db.refresh(shipment)
         return {"ok": True, "shipment_id": shipment.id, "tracking_number": shipment.tracking_number, "delivery_status": order.delivery_status}
     except DigylogError as exc:
-        db.commit()  # preserves the failed integration event/shipment for troubleshooting
-        raise HTTPException(502, str(exc)) from exc
+        _raise_digylog_dispatch_error(
+            db,
+            order,
+            user,
+            exc,
+        )
 
 
 @router.post("/digylog/dispatch/{order_id}")
@@ -354,10 +430,20 @@ def dispatch_to_default_digylog(
         raise HTTPException(409, "No active Digylog integration is configured for this store")
     try:
         shipment = dispatch_order(db, row, order)
+
+        if order.call_status == "BLACKLIST":
+            order.call_status = "CONFIRMED"
+
+            from app.services.payouts import reconcile_confirmation_payout
+            reconcile_confirmation_payout(db, order)
         log_action(db, user_id=user.id, action="ORDER_DISPATCHED_DIGYLOG", entity_type="ORDER", entity_id=order.id, after={"integration_id": row.id, "tracking": shipment.tracking_number})
         db.commit()
         db.refresh(shipment)
         return {"ok": True, "integration_id": row.id, "shipment_id": shipment.id, "tracking_number": shipment.tracking_number, "delivery_status": order.delivery_status}
     except DigylogError as exc:
-        db.commit()
-        raise HTTPException(502, str(exc)) from exc
+        _raise_digylog_dispatch_error(
+            db,
+            order,
+            user,
+            exc,
+        )

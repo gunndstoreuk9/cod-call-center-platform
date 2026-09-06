@@ -178,7 +178,7 @@ def test_connection(integration: IntegrationConfig) -> dict:
 
 
 def dispatch_order(db: Session, integration: IntegrationConfig, order: Order) -> DeliveryShipment:
-    if order.call_status != "CONFIRMED":
+    if order.call_status not in {"CONFIRMED", "BLACKLIST"}:
         raise DigylogError("Order must be CONFIRMED before dispatch")
     existing = (
         db.query(DeliveryShipment)
