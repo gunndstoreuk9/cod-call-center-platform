@@ -18,14 +18,29 @@ const emptyManual = {
   call_note: ''
 }
 
+const blockedDelivery = [
+  'DISPATCHED',
+  'IN_TRANSIT',
+  'OUT_FOR_DELIVERY',
+  'DELIVERED'
+]
+
 export default function WorkspacePage() {
-  const { t, status: statusText } = useI18n()
+  const { t, status: statusText, date } = useI18n()
 
   const [bucket, setBucket] = useState('NEW')
-  const [blacklistCount, setBlacklistCount] = useState(0)
   const [orders, setOrders] = useState([])
-  const [selected, setSelected] = useState(null)
+  const [allOrders, setAllOrders] = useState([])
+  const [search, setSearch] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+
+  const [selectedIds, setSelectedIds] = useState([])
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkResult, setBulkResult] = useState(null)
+  const [dispatchingId, setDispatchingId] = useState(null)
+
+  const [selected, setSelected] = useState(null)
 
   const [cbOpen, setCbOpen] = useState(false)
   const [cbTime, setCbTime] = useState('')
@@ -49,37 +64,120 @@ export default function WorkspacePage() {
     call_note: ''
   })
 
-  const loadBlacklistCount = async () => {
-    try {
-      const rows = await api(
-        '/orders/my-queue?bucket=BLACKLIST&limit=200'
-      )
+  const isReady = o =>
+    o?.call_status === 'CONFIRMED' &&
+    !blockedDelivery.includes(o?.delivery_status)
 
-      setBlacklistCount(rows.length)
-      return rows
-    } catch {
-      return []
+  const isSent = o =>
+    blockedDelivery.includes(o?.delivery_status)
+
+  const fetchData = async activeBucket => {
+    setError('')
+
+    try {
+      const apiBucket = activeBucket === 'READY' ? 'ALL' : activeBucket
+
+      const [rows, summary] = await Promise.all([
+        api(`/orders/my-queue?bucket=${apiBucket}&limit=200`),
+        api('/orders/my-queue?bucket=ALL&limit=200')
+      ])
+
+      const visible =
+        activeBucket === 'READY'
+          ? rows.filter(isReady)
+          : rows
+
+      setOrders(visible)
+      setAllOrders(summary)
+
+      setSelectedIds(current =>
+        current.filter(id =>
+          visible.some(o => o.id === id && isReady(o))
+        )
+      )
+    } catch (e) {
+      setError(e.message)
     }
   }
 
-  const load = () =>
-    api(`/orders/my-queue?bucket=${bucket}`)
-      .then(rows => {
-        setOrders(rows)
-        setSelected(s => rows.find(x => x.id === s?.id) || rows[0] || null)
-      })
-      .catch(e => setError(e.message))
-
   useEffect(() => {
-    load()
-    loadBlacklistCount()
+    fetchData(bucket)
   }, [bucket])
+
+  const refresh = async () => {
+    await fetchData(bucket)
+  }
+
+  const counts = useMemo(() => {
+    const followUp = allOrders.filter(o =>
+      ['NO_ANSWER', 'BUSY', 'CALLBACK'].includes(o.call_status)
+    ).length
+
+    return {
+      all: allOrders.length,
+      new: allOrders.filter(o => o.call_status === 'NEW').length,
+      followUp,
+      confirmed: allOrders.filter(o => o.call_status === 'CONFIRMED').length,
+      ready: allOrders.filter(isReady).length,
+      sent: allOrders.filter(isSent).length,
+      blacklist: allOrders.filter(o => o.call_status === 'BLACKLIST').length
+    }
+  }, [allOrders])
+
+  const filteredOrders = useMemo(() => {
+    const q = search.trim().toLowerCase()
+
+    if (!q) return orders
+
+    return orders.filter(o =>
+      [
+        o.customer_name,
+        o.customer_phone,
+        o.order_number,
+        o.city,
+        o.address,
+        o.product_name,
+        o.product_sku,
+        o.offer_name,
+        o.store_name,
+        o.source
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+        .includes(q)
+    )
+  }, [orders, search])
+
+  const readyVisible = useMemo(
+    () => filteredOrders.filter(isReady),
+    [filteredOrders]
+  )
+
+  const selectedProduct = useMemo(
+    () => products.find(p => p.id === manual.product_id),
+    [products, manual.product_id]
+  )
+
+  const selectedOffer = useMemo(
+    () => selectedProduct?.offers?.find(o => o.id === manual.offer_id),
+    [selectedProduct, manual.offer_id]
+  )
+
+  const previewTotal = selectedOffer
+    ? selectedOffer.price
+    : selectedProduct
+      ? Number(selectedProduct.selling_price || 0) *
+        Number(manual.quantity || 1)
+      : 0
 
   const loadManualMeta = async () => {
     setError('')
+
     try {
       const data = await api('/orders/manual-meta')
       const list = data.products || []
+
       setProducts(list)
 
       if (list.length) {
@@ -95,16 +193,6 @@ export default function WorkspacePage() {
       setError(e.message)
     }
   }
-
-  const selectedProduct = useMemo(
-    () => products.find(p => p.id === manual.product_id),
-    [products, manual.product_id]
-  )
-
-  const selectedOffer = useMemo(
-    () => selectedProduct?.offers?.find(o => o.id === manual.offer_id),
-    [selectedProduct, manual.offer_id]
-  )
 
   const changeManualProduct = id => {
     const p = products.find(x => x.id === id)
@@ -123,15 +211,12 @@ export default function WorkspacePage() {
     setManual({
       ...manual,
       offer_id: id,
-      quantity: offer?.quantity || selectedProduct?.default_qty || 1
+      quantity:
+        offer?.quantity ||
+        selectedProduct?.default_qty ||
+        1
     })
   }
-
-  const previewTotal = selectedOffer
-    ? selectedOffer.price
-    : selectedProduct
-      ? Number(selectedProduct.selling_price || 0) * Number(manual.quantity || 1)
-      : 0
 
   const createManualOrder = async e => {
     e.preventDefault()
@@ -164,12 +249,9 @@ export default function WorkspacePage() {
 
       setManualOpen(false)
       setManual(emptyManual)
-
-      if (bucket !== 'NEW') {
-        setBucket('NEW')
-      } else {
-        await load()
-      }
+      setNotice(t('Order created successfully.'))
+      setBucket('NEW')
+      await fetchData('NEW')
     } catch (e) {
       setError(e.message)
     } finally {
@@ -177,47 +259,46 @@ export default function WorkspacePage() {
     }
   }
 
-  const openEditOrder = () => {
-    if (!selected) return
+  const canEditOrder = order =>
+    order &&
+    !order.delivery_tracking &&
+    !blockedDelivery.includes(order.delivery_status)
 
-    setError('')
+  const openEditOrder = order => {
+    setSelected(order)
 
     setEditForm({
-      customer_name: selected.customer_name || '',
-      phone: selected.customer_phone || '',
-      city: selected.city || '',
-      address: selected.address || '',
-      quantity: Number(selected.quantity || 1),
-      unit_price: selected.unit_price ?? '',
-      total_price: selected.total_price ?? '',
-      call_note: selected.call_note || ''
+      customer_name: order.customer_name || '',
+      phone: order.customer_phone || '',
+      city: order.city || '',
+      address: order.address || '',
+      quantity: Number(order.quantity || 1),
+      unit_price: order.unit_price ?? '',
+      total_price: order.total_price ?? '',
+      call_note: order.call_note || ''
     })
 
     setEditOpen(true)
   }
 
   const changeEditQuantity = value => {
-    const qty = value
-
     setEditForm(f => ({
       ...f,
-      quantity: qty,
+      quantity: value,
       total_price:
-        qty !== '' && f.unit_price !== ''
-          ? (Number(qty) * Number(f.unit_price)).toFixed(2)
+        value !== '' && f.unit_price !== ''
+          ? (Number(value) * Number(f.unit_price)).toFixed(2)
           : f.total_price
     }))
   }
 
   const changeEditUnitPrice = value => {
-    const unit = value
-
     setEditForm(f => ({
       ...f,
-      unit_price: unit,
+      unit_price: value,
       total_price:
-        unit !== '' && f.quantity !== ''
-          ? (Number(unit) * Number(f.quantity)).toFixed(2)
+        value !== '' && f.quantity !== ''
+          ? (Number(value) * Number(f.quantity)).toFixed(2)
           : f.total_price
     }))
   }
@@ -228,7 +309,7 @@ export default function WorkspacePage() {
     if (!selected) return
 
     if (!editForm.city) {
-      setError('Select a Digylog city.')
+      setError(t('Select a Digylog city.'))
       return
     }
 
@@ -251,7 +332,8 @@ export default function WorkspacePage() {
       })
 
       setEditOpen(false)
-      await load()
+      setNotice(t('Order updated successfully.'))
+      await refresh()
     } catch (e) {
       setError(e.message)
     } finally {
@@ -259,21 +341,13 @@ export default function WorkspacePage() {
     }
   }
 
-  const canEditSelected =
-    selected &&
-    !selected.delivery_tracking &&
-    ![
-      'DISPATCHED',
-      'IN_TRANSIT',
-      'OUT_FOR_DELIVERY',
-      'DELIVERED'
-    ].includes(selected.delivery_status)
+  const outcome = async (order, status) => {
+    if (!order) return
 
-  const outcome = async status => {
-    if (!selected) return
+    setError('')
 
     try {
-      await api(`/orders/${selected.id}/call-attempts`, {
+      await api(`/orders/${order.id}/call-attempts`, {
         method: 'POST',
         body: {
           outcome: status,
@@ -281,14 +355,29 @@ export default function WorkspacePage() {
         }
       })
 
-      await load()
+      setNotice(
+        `${order.customer_name} → ${statusText(status)}`
+      )
+
+      await refresh()
     } catch (e) {
       setError(e.message)
     }
   }
 
+  const openCallback = order => {
+    setSelected(order)
+    setCbTime('')
+    setCbNote(order.call_note || '')
+    setCbOpen(true)
+  }
+
   const callback = async e => {
     e.preventDefault()
+
+    if (!selected) return
+
+    setError('')
 
     try {
       await api(`/orders/${selected.id}/callbacks`, {
@@ -303,328 +392,666 @@ export default function WorkspacePage() {
       setCbOpen(false)
       setCbTime('')
       setCbNote('')
-      await load()
-    } catch (err) {
-      setError(err.message)
+      setNotice(t('Callback scheduled.'))
+
+      await refresh()
+    } catch (e) {
+      setError(e.message)
     }
   }
 
-  const dispatchDigylog = async () => {
-    if (!selected) return
-
+  const dispatchDigylog = async order => {
+    setDispatchingId(order.id)
     setError('')
 
     try {
       const r = await api(
-        `/integrations/digylog/dispatch/${selected.id}`,
-        {
-          method: 'POST'
-        }
+        `/integrations/digylog/dispatch/${order.id}`,
+        { method: 'POST' }
       )
 
-      alert(
+      setNotice(
         `${t('Sent to Digylog. Tracking:')} ${
           r.tracking_number || 'created'
         }`
       )
 
-      await loadBlacklistCount()
-      await load()
+      await refresh()
     } catch (e) {
-      /*
-       * Do NOT classify every Digylog error as blacklist.
-       * Backend is responsible for that.
-       *
-       * After a failure we reload the BLACKLIST queue and verify
-       * whether this exact order was actually moved there.
-       */
-      const blacklistedRows = await loadBlacklistCount()
-
-      const becameBlacklisted = blacklistedRows.some(
-        row => row.id === selected.id
-      )
-
-      if (becameBlacklisted) {
-        setError(
-          t(
-            'Digylog rejected this phone number because it is blacklisted. Edit the phone or customer information, then retry.'
-          )
+      try {
+        const blacklisted = await api(
+          '/orders/my-queue?bucket=BLACKLIST&limit=200'
         )
 
-        setBucket('BLACKLIST')
-        return
+        if (blacklisted.some(x => x.id === order.id)) {
+          setError(
+            t(
+              'Digylog rejected this phone number because it is blacklisted. Edit the phone or customer information, then retry.'
+            )
+          )
+          setBucket('BLACKLIST')
+        } else {
+          setError(e.message)
+        }
+      } catch {
+        setError(e.message)
       }
+    } finally {
+      setDispatchingId(null)
+    }
+  }
 
+  const toggleSelected = id => {
+    setSelectedIds(current =>
+      current.includes(id)
+        ? current.filter(x => x !== id)
+        : [...current, id]
+    )
+  }
+
+  const selectAllReady = () => {
+    const ids = readyVisible.map(o => o.id)
+
+    const allAlready = ids.every(id =>
+      selectedIds.includes(id)
+    )
+
+    if (allAlready) {
+      setSelectedIds(current =>
+        current.filter(id => !ids.includes(id))
+      )
+    } else {
+      setSelectedIds(current =>
+        Array.from(new Set([...current, ...ids]))
+      )
+    }
+  }
+
+  const bulkDispatch = async () => {
+    if (!selectedIds.length) return
+
+    setBulkBusy(true)
+    setBulkResult(null)
+    setError('')
+
+    try {
+      const result = await api(
+        '/integrations/digylog/dispatch-bulk',
+        {
+          method: 'POST',
+          body: {
+            order_ids: selectedIds
+          }
+        }
+      )
+
+      const failures = (result.results || [])
+        .filter(x => !x.ok)
+        .slice(0, 5)
+
+      setBulkResult({
+        sent: result.sent || 0,
+        failed: result.failed || 0,
+        failures
+      })
+
+      setSelectedIds([])
+      await refresh()
+    } catch (e) {
       setError(e.message)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const tabItems = [
+    ['NEW', t('New'), counts.new],
+    ['FOLLOW_UP', t('Follow-up'), counts.followUp],
+    ['CONFIRMED', t('Confirmed'), counts.confirmed],
+    ['READY', t('Ready to Send'), counts.ready],
+    ['BLACKLIST', 'Blacklist', counts.blacklist],
+    ['ALL', t('All'), counts.all]
+  ]
+
+  const formatCreated = value => {
+    if (!value) return '—'
+
+    try {
+      return date ? date(value) : new Date(value).toLocaleString()
+    } catch {
+      return '—'
     }
   }
 
   return (
     <>
-      <div className="page-head">
-        <div>
-          <h1>{t('Call Workspace')}</h1>
-          <p>{t('Call → outcome → save → next order.')}</p>
-        </div>
+      <div className="awv2">
 
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <button className="btn" onClick={loadManualMeta}>
-            {t('+ Manual Order')}
+        <section className="awv2-hero">
+          <div>
+            <span className="awv2-kicker">
+              COD OPS · AGENT DESK
+            </span>
+
+            <h1>{t('Call Workspace')}</h1>
+
+            <p>
+              {t(
+                'Call customers, confirm orders and move ready orders to delivery.'
+              )}
+            </p>
+          </div>
+
+          <button
+            className="btn awv2-manual"
+            onClick={loadManualMeta}
+          >
+            + {t('Manual Order')}
           </button>
+        </section>
 
-          <div className="tabs">
-            {['NEW', 'FOLLOW_UP', 'CONFIRMED', 'BLACKLIST', 'ALL'].map(x => (
+        <section className="awv2-kpis">
+          <div className="awv2-kpi">
+            <span>{t('Assigned')}</span>
+            <strong>{counts.all}</strong>
+            <small>{t('My orders')}</small>
+          </div>
+
+          <div className="awv2-kpi">
+            <span>{t('New')}</span>
+            <strong>{counts.new}</strong>
+            <small>{t('Waiting')}</small>
+          </div>
+
+          <div className="awv2-kpi">
+            <span>{t('Follow-up')}</span>
+            <strong>{counts.followUp}</strong>
+            <small>{t('Need another call')}</small>
+          </div>
+
+          <div className="awv2-kpi success">
+            <span>{t('Confirmed')}</span>
+            <strong>{counts.confirmed}</strong>
+            <small>{t('Accepted')}</small>
+          </div>
+
+          <div className="awv2-kpi ready">
+            <span>{t('Ready to Send')}</span>
+            <strong>{counts.ready}</strong>
+            <small>Digylog</small>
+          </div>
+
+          <div className="awv2-kpi sent">
+            <span>{t('Sent')}</span>
+            <strong>{counts.sent}</strong>
+            <small>{t('Delivery')}</small>
+          </div>
+        </section>
+
+        {error && (
+          <div className="error awv2-message">
+            {error}
+          </div>
+        )}
+
+        {notice && (
+          <div className="awv2-notice">
+            <strong>✓</strong>
+            <span>{notice}</span>
+            <button onClick={() => setNotice('')}>×</button>
+          </div>
+        )}
+
+        {bulkResult && (
+          <div
+            className={
+              bulkResult.failed
+                ? 'awv2-bulk-result partial'
+                : 'awv2-bulk-result'
+            }
+          >
+            <div>
+              <strong>
+                {bulkResult.sent} {t('sent')}
+              </strong>
+
+              <span>
+                {bulkResult.failed} {t('failed')}
+              </span>
+            </div>
+
+            {bulkResult.failures.length > 0 && (
+              <small>
+                {bulkResult.failures
+                  .map(x => x.error)
+                  .join(' · ')}
+              </small>
+            )}
+
+            <button onClick={() => setBulkResult(null)}>
+              ×
+            </button>
+          </div>
+        )}
+
+        <section className="awv2-toolbar">
+          <div className="awv2-search">
+            <span>⌕</span>
+
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={t(
+                'Search customer, phone, city, order, product...'
+              )}
+            />
+
+            {search && (
+              <button onClick={() => setSearch('')}>
+                ×
+              </button>
+            )}
+          </div>
+
+          <div className="awv2-tabs">
+            {tabItems.map(([key, label, count]) => (
               <button
-                key={x}
-                className={bucket === x ? 'tab active' : 'tab'}
-                onClick={() => setBucket(x)}
-              >
-                <span>{statusText(x)}</span>
-
-            {x === 'BLACKLIST' && blacklistCount > 0 && (
-              <span
-                style={{
-                  marginInlineStart: 6,
-                  minWidth: 20,
-                  height: 20,
-                  padding: '0 6px',
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  borderRadius: 999,
-                  background: '#dc2626',
-                  color: '#fff',
-                  fontSize: 11,
-                  fontWeight: 800
+                key={key}
+                className={
+                  bucket === key
+                    ? 'awv2-tab active'
+                    : 'awv2-tab'
+                }
+                onClick={() => {
+                  setBucket(key)
+                  setSearch('')
+                  setSelectedIds([])
                 }}
               >
-                {blacklistCount}
-              </span>
-            )}
+                <span>{label}</span>
+                <b>{count}</b>
               </button>
             ))}
           </div>
-        </div>
-      </div>
 
-      {error && <div className="error">{error}</div>}
-
-      <div className="workspace-grid">
-        <div className="order-focus">
-          {selected ? (
-            <>
-              <StatusBadge value={selected.call_status} />
-
-            {selected.call_status === 'BLACKLIST' && (
-              <div
-                style={{
-                  marginTop: 14,
-                  marginBottom: 14,
-                  padding: '12px 14px',
-                  borderRadius: 12,
-                  border: '1px solid #fecaca',
-                  background: '#fef2f2',
-                  color: '#b91c1c'
-                }}
-              >
-                <div
-                  style={{
-                    fontWeight: 800,
-                    marginBottom: 4
-                  }}
-                >
-                  ⚠ {t('Digylog Blacklist')}
-                </div>
-
-                <div
-                  style={{
-                    fontSize: 13,
-                    lineHeight: 1.55
-                  }}
-                >
-                  {t(
-                    'Digylog rejected this phone number and the order was moved to Blacklist.'
-                  )}
-                </div>
-
-                <div
-                  style={{
-                    marginTop: 6,
-                    fontSize: 13,
-                    fontWeight: 800
-                  }}
-                  dir="ltr"
-                >
-                  {selected.customer_phone}
-                </div>
-
-                <div
-                  style={{
-                    marginTop: 5,
-                    fontSize: 12
-                  }}
-                >
-                  {t(
-                    'Edit the customer information, then retry sending to Digylog.'
-                  )}
-                </div>
-              </div>
-            )}
-
-              <h2>{selected.customer_name}</h2>
-
-              <div className="customer-phone">
-                {selected.customer_phone}
-              </div>
-
-              <p>
-                {selected.city || t('No city')} ·{' '}
-                {selected.address || t('No address yet')}
-              </p>
-
-              <div className="panel" style={{ marginTop: 16 }}>
-                <strong>{selected.product_name}</strong>
-                <div>
-                  {selected.product_sku} · {t('Quantity')} {selected.quantity} ·{' '}
-                  {money(selected.total_price, selected.currency)}
-                </div>
-              </div>
-
-              <div className="action-grid">
-                <button
-                  className="btn success"
-                  onClick={() => outcome('CONFIRMED')}
-                >
-                  {t('Confirmed')}
-                </button>
-
-                <button
-                  className="btn secondary"
-                  onClick={() => outcome('NO_ANSWER')}
-                >
-                  {t('No Answer')}
-                </button>
-
-                <button
-                  className="btn secondary"
-                  onClick={() => outcome('BUSY')}
-                >
-                  {t('Busy')}
-                </button>
-
-                <button
-                  className="btn warning"
-                  onClick={() => setCbOpen(true)}
-                >
-                  {t('Callback')}
-                </button>
-
-                <button
-                  className="btn danger"
-                  onClick={() => outcome('CANCELLED')}
-                >
-                  {t('Cancelled')}
-                </button>
-
-                <button
-                  className="btn secondary"
-                  onClick={() => outcome('WRONG_NUMBER')}
-                >
-                  {t('Wrong Number')}
-                </button>
-              </div>
-
-              <div
-                className="form-actions"
-                style={{
-                  justifyContent: 'flex-start',
-                  flexWrap: 'wrap'
-                }}
-              >
-                {canEditSelected && (
-                  <button
-                    type="button"
-                    className="btn"
-                    onClick={openEditOrder}
-                  >
-                    {t('Edit Order')}
-                  </button>
-                )}
-                <a
-                  className="btn secondary"
-                  href={`tel:${selected.customer_phone}`}
-                >
-                  {t('Call phone')}
-                </a>
-
-                <a
-                  className="btn secondary"
-                  href={`https://wa.me/${(selected.customer_phone || '').replace(/\D/g, '')}`}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  WhatsApp
-                </a>
-
-                {['CONFIRMED', 'BLACKLIST'].includes(selected.call_status) &&
-                  ![
-                    'DISPATCHED',
-                    'IN_TRANSIT',
-                    'OUT_FOR_DELIVERY',
-                    'DELIVERED'
-                  ].includes(selected.delivery_status) && (
-                    <button
-                      className="btn warning"
-                      onClick={dispatchDigylog}
-                    >
-                      {selected.call_status === 'BLACKLIST'
-                  ? t('Retry Send Digylog')
-                  : t('Send Digylog')}
-                    </button>
-                  )}
-
-                {selected.delivery_tracking && (
-                  <span className="badge ok">
-                    {t('Tracking')}: {selected.delivery_tracking}
-                  </span>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="empty">
-              {t('No orders in this queue.')}
-            </div>
+          {readyVisible.length > 0 && (
+            <button
+              className="btn secondary awv2-select-all"
+              onClick={selectAllReady}
+            >
+              {readyVisible.every(o =>
+                selectedIds.includes(o.id)
+              )
+                ? t('Clear selection')
+                : `${t('Select ready')} (${readyVisible.length})`}
+            </button>
           )}
-        </div>
+        </section>
 
-        <div>
-          <div className="panel-head" style={{ marginBottom: 10 }}>
-            <h3>
-              {t('Queue')} ({orders.length})
-            </h3>
+        <div className="awv2-list-head">
+          <div>
+            <h2>{t('Orders')}</h2>
+            <p>
+              {filteredOrders.length} {t('orders in this view')}
+            </p>
           </div>
 
-          <div className="queue-list">
-            {orders.map(o => (
-              <div
-                key={o.id}
-                className={
-                  selected?.id === o.id
-                    ? 'queue-item active'
-                    : 'queue-item'
-                }
-                onClick={() => setSelected(o)}
+          <button
+            className="btn small secondary"
+            onClick={refresh}
+          >
+            ↻ {t('Refresh')}
+          </button>
+        </div>
+
+        {filteredOrders.length === 0 ? (
+          <div className="awv2-empty">
+            <div>✓</div>
+            <h3>{t('Queue is clear')}</h3>
+            <p>{t('No orders in this view.')}</p>
+          </div>
+        ) : (
+          <section className="awv2-order-grid">
+            {filteredOrders.map(order => {
+              const sendable = isReady(order)
+              const checked = selectedIds.includes(order.id)
+              const blacklisted =
+                order.call_status === 'BLACKLIST'
+
+              return (
+                <article
+                  className={
+                    checked
+                      ? 'awv2-card selected'
+                      : blacklisted
+                        ? 'awv2-card blacklist'
+                        : 'awv2-card'
+                  }
+                  key={order.id}
+                >
+                  <div className="awv2-card-top">
+                    <div className="awv2-card-order">
+                      {sendable && (
+                        <label
+                          className="awv2-check"
+                          title={t('Select for Digylog')}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() =>
+                              toggleSelected(order.id)
+                            }
+                          />
+                          <span />
+                        </label>
+                      )}
+
+                      <div>
+                        <small>{t('Order')}</small>
+                        <strong>
+                          {order.order_number || '—'}
+                        </strong>
+                      </div>
+                    </div>
+
+                    <div className="awv2-card-status">
+                      <StatusBadge
+                        value={order.call_status}
+                      />
+
+                      {order.delivery_status &&
+                        order.delivery_status !== 'NOT_READY' && (
+                          <StatusBadge
+                            value={order.delivery_status}
+                          />
+                        )}
+                    </div>
+                  </div>
+
+                  {blacklisted && (
+                    <div className="awv2-blacklist-alert">
+                      <strong>
+                        {t('Digylog Blacklist')}
+                      </strong>
+                      <span>
+                        {t(
+                          'Correct the customer information before retrying delivery.'
+                        )}
+                      </span>
+                    </div>
+                  )}
+
+                  <div className="awv2-customer">
+                    <div>
+                      <span className="awv2-label">
+                        {t('Customer')}
+                      </span>
+
+                      <h3>
+                        {order.customer_name || '—'}
+                      </h3>
+
+                      <a
+                        className="awv2-phone"
+                        href={`tel:${order.customer_phone}`}
+                        dir="ltr"
+                      >
+                        {order.customer_phone || '—'}
+                      </a>
+                    </div>
+
+                    <div className="awv2-price">
+                      <span>{t('Total')}</span>
+                      <strong>
+                        {money(
+                          order.total_price,
+                          order.currency
+                        )}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="awv2-info-grid">
+                    <div>
+                      <span>{t('City')}</span>
+                      <strong>
+                        {order.city || '—'}
+                      </strong>
+                    </div>
+
+                    <div>
+                      <span>{t('Store')}</span>
+                      <strong>
+                        {order.store_name || '—'}
+                      </strong>
+                    </div>
+
+                    <div className="wide">
+                      <span>{t('Address')}</span>
+                      <strong>
+                        {order.address ||
+                          t('No address yet')}
+                      </strong>
+                    </div>
+                  </div>
+
+                  <div className="awv2-product">
+                    <div className="awv2-product-icon">
+                      P
+                    </div>
+
+                    <div className="awv2-product-copy">
+                      <span>{t('Product')}</span>
+
+                      <strong>
+                        {order.product_name || '—'}
+                      </strong>
+
+                      <small>
+                        {order.product_sku || '—'}
+                      </small>
+                    </div>
+
+                    <div className="awv2-product-meta">
+                      <div>
+                        <span>{t('Offer')}</span>
+                        <strong>
+                          {order.offer_name ||
+                            t('Standard')}
+                        </strong>
+                      </div>
+
+                      <div>
+                        <span>{t('Qty')}</span>
+                        <strong>
+                          {order.quantity || 1}
+                        </strong>
+                      </div>
+                    </div>
+                  </div>
+
+                  {order.call_note && (
+                    <div className="awv2-note">
+                      <span>{t('Agent Note')}</span>
+                      <p>{order.call_note}</p>
+                    </div>
+                  )}
+
+                  <div className="awv2-meta-line">
+                    <span>
+                      {order.source || '—'}
+                    </span>
+
+                    <span>
+                      {formatCreated(order.created_at)}
+                    </span>
+
+                    {order.delivery_tracking && (
+                      <span className="track">
+                        {t('Tracking')}: {order.delivery_tracking}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="awv2-primary-actions">
+                    <button
+                      className="awv2-action confirm"
+                      onClick={() =>
+                        outcome(order, 'CONFIRMED')
+                      }
+                    >
+                      <strong>✓</strong>
+                      <span>{t('Confirmed')}</span>
+                    </button>
+
+                    <button
+                      className="awv2-action callback"
+                      onClick={() =>
+                        openCallback(order)
+                      }
+                    >
+                      <strong>↻</strong>
+                      <span>{t('Callback')}</span>
+                    </button>
+
+                    <a
+                      className="awv2-action call"
+                      href={`tel:${order.customer_phone}`}
+                    >
+                      <strong>☎</strong>
+                      <span>{t('Call')}</span>
+                    </a>
+
+                    <a
+                      className="awv2-action whatsapp"
+                      href={`https://wa.me/${(
+                        order.customer_phone || ''
+                      ).replace(/\D/g, '')}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <strong>W</strong>
+                      <span>WhatsApp</span>
+                    </a>
+                  </div>
+
+                  <div className="awv2-secondary-actions">
+                    <button
+                      onClick={() =>
+                        outcome(order, 'NO_ANSWER')
+                      }
+                    >
+                      {t('No Answer')}
+                    </button>
+
+                    <button
+                      onClick={() =>
+                        outcome(order, 'BUSY')
+                      }
+                    >
+                      {t('Busy')}
+                    </button>
+
+                    <button
+                      onClick={() =>
+                        outcome(
+                          order,
+                          'NOT_INTERESTED'
+                        )
+                      }
+                    >
+                      {t('Not Interested')}
+                    </button>
+
+                    <button
+                      onClick={() =>
+                        outcome(
+                          order,
+                          'WRONG_NUMBER'
+                        )
+                      }
+                    >
+                      {t('Wrong Number')}
+                    </button>
+
+                    {canEditOrder(order) && (
+                      <button
+                        className="edit"
+                        onClick={() =>
+                          openEditOrder(order)
+                        }
+                      >
+                        {t('Edit')}
+                      </button>
+                    )}
+                  </div>
+
+                  {(sendable || blacklisted) &&
+                    !isSent(order) && (
+                      <button
+                        className={
+                          blacklisted
+                            ? 'awv2-send retry'
+                            : 'awv2-send'
+                        }
+                        disabled={
+                          dispatchingId === order.id
+                        }
+                        onClick={() =>
+                          dispatchDigylog(order)
+                        }
+                      >
+                        {dispatchingId === order.id
+                          ? t('Sending...')
+                          : blacklisted
+                            ? t('Retry Send to Digylog')
+                            : t('Send to Digylog')}
+                      </button>
+                    )}
+                </article>
+              )
+            })}
+          </section>
+        )}
+
+        {selectedIds.length > 0 && (
+          <div className="awv2-bulk-bar">
+            <div>
+              <span>
+                {t('Selected')}
+              </span>
+
+              <strong>
+                {selectedIds.length}
+              </strong>
+
+              <small>
+                {t('confirmed orders ready for Digylog')}
+              </small>
+            </div>
+
+            <div className="awv2-bulk-buttons">
+              <button
+                className="btn secondary"
+                onClick={() => setSelectedIds([])}
+                disabled={bulkBusy}
               >
-                <strong>{o.customer_name}</strong>
-                <br />
-                <small>
-                  {o.product_name} · {o.city || t('No city')} ·{' '}
-                  {statusText(o.call_status)}
-                </small>
-              </div>
-            ))}
+                {t('Clear')}
+              </button>
+
+              <button
+                className="btn awv2-bulk-send"
+                onClick={bulkDispatch}
+                disabled={bulkBusy}
+              >
+                {bulkBusy
+                  ? t('Sending...')
+                  : `${t('Send Selected to Digylog')} (${selectedIds.length})`}
+              </button>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <Modal
@@ -635,7 +1062,9 @@ export default function WorkspacePage() {
       >
         {products.length === 0 ? (
           <div className="empty">
-            {t('No products are assigned to your agent account.')}
+            {t(
+              'No products are assigned to your agent account.'
+            )}
           </div>
         ) : (
           <form onSubmit={createManualOrder}>
@@ -643,13 +1072,19 @@ export default function WorkspacePage() {
 
               <div className="field full">
                 <label>{t('Product')}</label>
+
                 <select
                   required
                   value={manual.product_id}
-                  onChange={e => changeManualProduct(e.target.value)}
+                  onChange={e =>
+                    changeManualProduct(e.target.value)
+                  }
                 >
                   {products.map(p => (
-                    <option key={p.id} value={p.id}>
+                    <option
+                      key={p.id}
+                      value={p.id}
+                    >
                       {p.name} — {p.sku}
                     </option>
                   ))}
@@ -662,16 +1097,24 @@ export default function WorkspacePage() {
 
                   <select
                     value={manual.offer_id}
-                    onChange={e => changeOffer(e.target.value)}
+                    onChange={e =>
+                      changeOffer(e.target.value)
+                    }
                   >
                     <option value="">
                       {t('Standard price')}
                     </option>
 
                     {selectedProduct.offers.map(o => (
-                      <option key={o.id} value={o.id}>
+                      <option
+                        key={o.id}
+                        value={o.id}
+                      >
                         {o.name} — {o.quantity} pcs —{' '}
-                        {money(o.price, selectedProduct.currency)}
+                        {money(
+                          o.price,
+                          selectedProduct.currency
+                        )}
                       </option>
                     ))}
                   </select>
@@ -680,6 +1123,7 @@ export default function WorkspacePage() {
 
               <div className="field">
                 <label>{t('Customer Name')}</label>
+
                 <input
                   required
                   value={manual.customer_name}
@@ -694,6 +1138,7 @@ export default function WorkspacePage() {
 
               <div className="field">
                 <label>{t('Phone')}</label>
+
                 <input
                   required
                   value={manual.phone}
@@ -720,6 +1165,7 @@ export default function WorkspacePage() {
 
               <div className="field">
                 <label>{t('Quantity')}</label>
+
                 <input
                   type="number"
                   min="1"
@@ -737,6 +1183,7 @@ export default function WorkspacePage() {
 
               <div className="field full">
                 <label>{t('Address')}</label>
+
                 <textarea
                   value={manual.address}
                   onChange={e =>
@@ -750,6 +1197,7 @@ export default function WorkspacePage() {
 
               <div className="field full">
                 <label>{t('Note')}</label>
+
                 <textarea
                   value={manual.call_note}
                   onChange={e =>
@@ -764,25 +1212,37 @@ export default function WorkspacePage() {
               <div className="field full">
                 <div className="panel">
                   <strong>{t('Order Total')}</strong>
-                  <div style={{ fontSize: 22, marginTop: 6 }}>
+
+                  <div
+                    style={{
+                      fontSize: 24,
+                      fontWeight: 800,
+                      marginTop: 6
+                    }}
+                  >
                     {money(
                       previewTotal,
-                      selectedProduct?.currency || 'MAD'
+                      selectedProduct?.currency ||
+                        'MAD'
                     )}
                   </div>
+
                   <small>
-                    {t('This order will automatically be assigned to you and created as NEW.')}
+                    {t(
+                      'This order will automatically be assigned to you and created as NEW.'
+                    )}
                   </small>
                 </div>
               </div>
-
             </div>
 
             <div className="form-actions">
               <button
                 type="button"
                 className="btn secondary"
-                onClick={() => setManualOpen(false)}
+                onClick={() =>
+                  setManualOpen(false)
+                }
               >
                 {t('Cancel')}
               </button>
@@ -857,7 +1317,9 @@ export default function WorkspacePage() {
                 required
                 value={editForm.quantity}
                 onChange={e =>
-                  changeEditQuantity(e.target.value)
+                  changeEditQuantity(
+                    e.target.value
+                  )
                 }
               />
             </div>
@@ -871,7 +1333,9 @@ export default function WorkspacePage() {
                 required
                 value={editForm.unit_price}
                 onChange={e =>
-                  changeEditUnitPrice(e.target.value)
+                  changeEditUnitPrice(
+                    e.target.value
+                  )
                 }
               />
             </div>
@@ -887,7 +1351,8 @@ export default function WorkspacePage() {
                 onChange={e =>
                   setEditForm({
                     ...editForm,
-                    total_price: e.target.value
+                    total_price:
+                      e.target.value
                   })
                 }
               />
@@ -918,7 +1383,6 @@ export default function WorkspacePage() {
                 }
               />
             </div>
-
           </div>
 
           <div className="form-actions">
@@ -942,28 +1406,34 @@ export default function WorkspacePage() {
         </form>
       </Modal>
 
-
       <Modal
         open={cbOpen}
         title="Schedule Callback"
         onClose={() => setCbOpen(false)}
       >
         <form onSubmit={callback}>
+
           <div className="field">
             <label>{t('Date & Time')}</label>
+
             <input
               type="datetime-local"
               required
               value={cbTime}
-              onChange={e => setCbTime(e.target.value)}
+              onChange={e =>
+                setCbTime(e.target.value)
+              }
             />
           </div>
 
           <div className="field">
             <label>{t('Note')}</label>
+
             <textarea
               value={cbNote}
-              onChange={e => setCbNote(e.target.value)}
+              onChange={e =>
+                setCbNote(e.target.value)
+              }
             />
           </div>
 
