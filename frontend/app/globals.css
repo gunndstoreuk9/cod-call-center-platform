@@ -2454,3 +2454,63 @@ html[dir="rtl"] .delivery-pagination{
     flex-wrap:wrap;
   }
 }
+
+/* ADMIN ORDERS — 20 PER PAGE */
+
+.orders-pager{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  padding:14px 16px;
+  border-top:1px solid #e5ecf3;
+  background:#fbfcfe;
+  color:#718198;
+  font-size:12px;
+  font-weight:600;
+}
+
+.orders-pager-controls{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+
+.orders-pager-controls button{
+  width:38px;
+  height:36px;
+  border:1px solid #d5e0ea;
+  border-radius:8px;
+  background:#fff;
+  color:#173b67;
+  font-size:22px;
+  font-weight:700;
+  cursor:pointer;
+}
+
+.orders-pager-controls button:hover:not(:disabled){
+  background:#edf5ff;
+  border-color:#83b4eb;
+}
+
+.orders-pager-controls button:disabled{
+  opacity:.35;
+  cursor:not-allowed;
+}
+
+.orders-pager-controls strong{
+  min-width:70px;
+  text-align:center;
+  color:#122033;
+  font-size:12px;
+}
+
+html[dir="rtl"] .orders-pager{
+  direction:rtl;
+}
+
+@media(max-width:640px){
+  .orders-pager{
+    flex-direction:column;
+  }
+}

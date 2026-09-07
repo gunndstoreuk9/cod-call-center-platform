@@ -164,6 +164,95 @@ def list_orders(
     return [order_to_dict(db, x) for x in rows]
 
 
+
+@router.get("/paginated")
+def paginated_orders(
+    product_id: str | None = None,
+    agent_id: str | None = None,
+    call_status: str | None = None,
+    delivery_status: str | None = None,
+    search: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    q = db.query(Order)
+
+    if user.role == "AGENT":
+        q = q.filter(
+            Order.assigned_agent_id == user.id
+        )
+    elif agent_id:
+        q = q.filter(
+            Order.assigned_agent_id == agent_id
+        )
+
+    if product_id:
+        q = q.filter(
+            Order.product_id == product_id
+        )
+
+    if call_status:
+        q = q.filter(
+            Order.call_status == call_status.upper()
+        )
+
+    if delivery_status:
+        q = q.filter(
+            Order.delivery_status == delivery_status.upper()
+        )
+
+    if search:
+        term = search.strip()
+
+        if term:
+            customer_ids = [
+                x.id
+                for x in (
+                    db.query(Customer)
+                    .filter(
+                        or_(
+                            Customer.name.ilike(f"%{term}%"),
+                            Customer.phone_e164.ilike(f"%{term}%"),
+                        )
+                    )
+                    .all()
+                )
+            ]
+
+            q = q.filter(
+                or_(
+                    Order.order_number.ilike(f"%{term}%"),
+                    Order.customer_id.in_(customer_ids),
+                )
+            )
+
+    total = q.count()
+
+    limit = min(max(limit, 1), 100)
+    offset = max(offset, 0)
+
+    rows = (
+        q.order_by(Order.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    return {
+        "items": [
+            order_to_dict(db, row)
+            for row in rows
+        ],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_previous": offset > 0,
+        "has_next": offset + len(rows) < total,
+    }
+
+
 @router.get("/my-queue", response_model=list[OrderOut])
 def my_queue(
     bucket: str = "NEW",
