@@ -106,32 +106,124 @@ def dashboard(
 
 @router.get("/shipments")
 def shipments(
-    provider: str | None = None, status: str | None = None, integration_id: str | None = None,
+    provider: str | None = None,
+    status: str | None = None,
+    integration_id: str | None = None,
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    paginated: bool = False,
     db: Session = Depends(get_db),
     _=Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
     q = db.query(DeliveryShipment)
-    if provider: q = q.filter(DeliveryShipment.provider == provider.upper())
-    if status: q = q.filter(DeliveryShipment.status == status.upper())
-    if integration_id: q = q.filter(DeliveryShipment.integration_id == integration_id)
-    rows = q.order_by(DeliveryShipment.created_at.desc()).limit(limit).all()
-    return [{c.name: getattr(row, c.name) for c in row.__table__.columns} for row in rows]
+
+    if provider:
+        q = q.filter(
+            DeliveryShipment.provider == provider.upper()
+        )
+
+    if status:
+        q = q.filter(
+            DeliveryShipment.status == status.upper()
+        )
+
+    if integration_id:
+        q = q.filter(
+            DeliveryShipment.integration_id == integration_id
+        )
+
+    total = q.count()
+
+    rows = (
+        q.order_by(
+            DeliveryShipment.created_at.desc()
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items = [
+        {
+            c.name: getattr(row, c.name)
+            for c in row.__table__.columns
+        }
+        for row in rows
+    ]
+
+    # Keep old API behavior unless pagination is requested.
+    if not paginated:
+        return items
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_previous": offset > 0,
+        "has_next": offset + len(items) < total,
+    }
 
 
 @router.get("/events")
 def events(
-    matched: bool | None = None, tracking: str | None = None, integration_id: str | None = None,
+    matched: bool | None = None,
+    tracking: str | None = None,
+    integration_id: str | None = None,
     limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    paginated: bool = False,
     db: Session = Depends(get_db),
     _=Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
     q = db.query(DeliveryEvent)
-    if matched is not None: q = q.filter(DeliveryEvent.matched.is_(matched))
-    if tracking: q = q.filter(DeliveryEvent.tracking_number == tracking)
-    if integration_id: q = q.filter(DeliveryEvent.integration_id == integration_id)
-    rows = q.order_by(DeliveryEvent.received_at.desc()).limit(limit).all()
-    return [{c.name: getattr(row, c.name) for c in row.__table__.columns} for row in rows]
+
+    if matched is not None:
+        q = q.filter(
+            DeliveryEvent.matched.is_(matched)
+        )
+
+    if tracking:
+        q = q.filter(
+            DeliveryEvent.tracking_number == tracking
+        )
+
+    if integration_id:
+        q = q.filter(
+            DeliveryEvent.integration_id == integration_id
+        )
+
+    total = q.count()
+
+    rows = (
+        q.order_by(
+            DeliveryEvent.received_at.desc()
+        )
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+
+    items = [
+        {
+            c.name: getattr(row, c.name)
+            for c in row.__table__.columns
+        }
+        for row in rows
+    ]
+
+    # Keep old API behavior unless pagination is requested.
+    if not paginated:
+        return items
+
+    return {
+        "items": items,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_previous": offset > 0,
+        "has_next": offset + len(items) < total,
+    }
 
 
 @router.get("/unmatched")
