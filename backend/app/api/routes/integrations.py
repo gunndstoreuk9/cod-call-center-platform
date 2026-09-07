@@ -672,3 +672,273 @@ def bulk_dispatch_to_digylog(
         "results": results,
     }
 
+
+# ============================================================
+# AGENT-SAFE DIGYLOG AUTO ROUTING
+# Agent never needs integration IDs or credentials.
+# Backend selects the active Digylog integration by order store.
+# ============================================================
+
+def _active_digylog_for_store(
+    db: Session,
+    store_id: str | None,
+) -> IntegrationConfig | None:
+
+    base = db.query(IntegrationConfig).filter(
+        IntegrationConfig.provider == "DIGYLOG",
+        IntegrationConfig.is_active.is_(True),
+    )
+
+    # Prefer an integration connected specifically to this store.
+    if store_id:
+        row = (
+            base.filter(
+                IntegrationConfig.store_id == store_id
+            )
+            .order_by(
+                IntegrationConfig.created_at.desc()
+            )
+            .first()
+        )
+
+        if row:
+            return row
+
+    # Fall back to a global Digylog integration.
+    return (
+        base.filter(
+            IntegrationConfig.store_id.is_(None)
+        )
+        .order_by(
+            IntegrationConfig.created_at.desc()
+        )
+        .first()
+    )
+
+
+@router.post("/digylog/dispatch/{order_id}")
+def auto_dispatch_to_digylog(
+    order_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """
+    Agent-safe single dispatch.
+
+    The frontend only sends the order ID.
+    Integration selection remains server-side.
+    """
+
+    if user.role not in {
+        "OWNER",
+        "ADMIN",
+        "SUPERVISOR",
+        "AGENT",
+    }:
+        raise HTTPException(
+            403,
+            "Insufficient permissions"
+        )
+
+    order = (
+        db.query(Order)
+        .filter(Order.id == order_id)
+        .first()
+    )
+
+    if not order:
+        raise HTTPException(
+            404,
+            "Order not found"
+        )
+
+    integration = _active_digylog_for_store(
+        db,
+        order.store_id,
+    )
+
+    if not integration:
+        raise HTTPException(
+            409,
+            "No active Digylog integration is configured for this store"
+        )
+
+    return dispatch_to_digylog(
+        integration.id,
+        order.id,
+        db,
+        user,
+    )
+
+
+@router.post("/digylog/dispatch-bulk")
+def auto_bulk_dispatch_to_digylog(
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """
+    Agent-safe multi-order Digylog dispatch.
+
+    Supports orders from different stores.
+    Every order is routed to its own active integration.
+
+    One failure does not stop the rest of the batch.
+    """
+
+    if user.role not in {
+        "OWNER",
+        "ADMIN",
+        "SUPERVISOR",
+        "AGENT",
+    }:
+        raise HTTPException(
+            403,
+            "Insufficient permissions"
+        )
+
+    raw_ids = payload.get("order_ids") or []
+
+    if not isinstance(raw_ids, list):
+        raise HTTPException(
+            400,
+            "order_ids must be a list"
+        )
+
+    order_ids = list(
+        dict.fromkeys(
+            str(x).strip()
+            for x in raw_ids
+            if str(x).strip()
+        )
+    )
+
+    if not order_ids:
+        raise HTTPException(
+            400,
+            "Select at least one order"
+        )
+
+    if len(order_ids) > 100:
+        raise HTTPException(
+            400,
+            "Maximum 100 orders per dispatch"
+        )
+
+    results = []
+    sent = 0
+    failed = 0
+
+    blocked_delivery_statuses = {
+        "DISPATCHED",
+        "IN_TRANSIT",
+        "OUT_FOR_DELIVERY",
+        "DELIVERED",
+    }
+
+    for order_id in order_ids:
+
+        try:
+            order = (
+                db.query(Order)
+                .filter(Order.id == order_id)
+                .first()
+            )
+
+            if not order:
+                raise HTTPException(
+                    404,
+                    "Order not found"
+                )
+
+            # Agents can only dispatch their own orders.
+            if (
+                user.role == "AGENT"
+                and order.assigned_agent_id != user.id
+            ):
+                raise HTTPException(
+                    403,
+                    "This order is not assigned to you"
+                )
+
+            # Only confirmed orders are allowed in bulk.
+            if order.call_status != "CONFIRMED":
+                raise HTTPException(
+                    409,
+                    "Order is not confirmed"
+                )
+
+            if (
+                order.delivery_status
+                in blocked_delivery_statuses
+            ):
+                raise HTTPException(
+                    409,
+                    f"Already sent: {order.delivery_status}"
+                )
+
+            integration = _active_digylog_for_store(
+                db,
+                order.store_id,
+            )
+
+            if not integration:
+                raise HTTPException(
+                    409,
+                    "No active Digylog integration for this store"
+                )
+
+            result = dispatch_to_digylog(
+                integration.id,
+                order.id,
+                db,
+                user,
+            )
+
+            sent += 1
+
+            results.append({
+                "order_id": order.id,
+                "order_number": order.order_number,
+                "ok": True,
+                "tracking_number":
+                    result.get("tracking_number"),
+                "delivery_status":
+                    result.get("delivery_status"),
+            })
+
+        except HTTPException as exc:
+
+            db.rollback()
+
+            failed += 1
+
+            results.append({
+                "order_id": order_id,
+                "ok": False,
+                "status_code": exc.status_code,
+                "error": str(exc.detail),
+            })
+
+        except Exception:
+
+            db.rollback()
+
+            failed += 1
+
+            results.append({
+                "order_id": order_id,
+                "ok": False,
+                "status_code": 500,
+                "error": "Unexpected dispatch error",
+            })
+
+    return {
+        "ok": failed == 0,
+        "requested": len(order_ids),
+        "sent": sent,
+        "failed": failed,
+        "results": results,
+    }
+
+
