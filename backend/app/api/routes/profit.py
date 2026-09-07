@@ -1,11 +1,13 @@
 from collections import defaultdict
 from datetime import date
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import require_roles
 from app.core.time import date_bounds, utcnow
@@ -283,6 +285,15 @@ def created_count(
     return q.count()
 
 
+def local_date_bounds(start, end):
+    tz = ZoneInfo(settings.timezone)
+
+    return (
+        start.astimezone(tz).date(),
+        end.astimezone(tz).date(),
+    )
+
+
 def spend_rows(
     db: Session,
     start,
@@ -290,8 +301,10 @@ def spend_rows(
     store_id: str | None,
     product_id: str | None,
 ):
-    start_day = start.date()
-    end_day = end.date()
+    start_day, end_day = local_date_bounds(
+        start,
+        end
+    )
 
     q = db.query(AdSpend).filter(
         AdSpend.spend_date >= start_day,
@@ -988,8 +1001,14 @@ def list_ad_spend(
     )
 
     q = db.query(AdSpend).filter(
-        AdSpend.spend_date >= start.date(),
-        AdSpend.spend_date < end.date(),
+        AdSpend.spend_date >= local_date_bounds(
+            start,
+            end
+        )[0],
+        AdSpend.spend_date < local_date_bounds(
+            start,
+            end
+        )[1],
     )
 
     if store_id:
