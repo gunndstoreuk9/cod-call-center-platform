@@ -107,7 +107,7 @@ def create_integration(
         config.setdefault("auth_prefix", "Bearer ")
         config.setdefault("referer", "https://apiseller.digylog.com")
         config.setdefault("network", 1)
-        config.setdefault("port", 1)
+        config.setdefault("port", 2)
         config.setdefault("add_status", 1)
         config.setdefault("check_duplicate", True)
     else:

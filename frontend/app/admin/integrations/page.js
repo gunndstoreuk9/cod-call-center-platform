@@ -12,7 +12,7 @@ const emptyDigylog = {
   api_token: '',
   digylog_store: '',
   network: 1,
-  port: 1,
+  port: 2,
   add_status: 1,
   check_duplicate: true,
   api_base_url: 'https://api.digylog.com/api/v2/seller',
@@ -315,7 +315,7 @@ export default function IntegrationsPage() {
         network:
           config.network ?? 1,
         port:
-          config.port ?? 1,
+          config.port ?? 2,
         add_status:
           config.add_status ?? 1,
         check_duplicate:
@@ -894,11 +894,11 @@ export default function IntegrationsPage() {
                 }
               >
                 <option value="1">
-                  1 — {t('Customer pays')}
+                  1 — {t('Seller pays')}
                 </option>
 
                 <option value="2">
-                  2 — {t('Seller pays')}
+                  2 — {t('Customer pays')}
                 </option>
               </select>
             </div>
@@ -1276,11 +1276,11 @@ export default function IntegrationsPage() {
                 }
               >
                 <option value="1">
-                  1 — {t('Customer pays')}
+                  1 — {t('Seller pays')}
                 </option>
 
                 <option value="2">
-                  2 — {t('Seller pays')}
+                  2 — {t('Customer pays')}
                 </option>
               </select>
             </div>

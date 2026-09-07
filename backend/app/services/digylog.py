@@ -106,7 +106,7 @@ def build_payload(db: Session, integration: IntegrationConfig, order: Order) -> 
         "city": order.city or customer.city or "",
         "price": float(Decimal(order.total_price)),
         "openproduct": int(config.get("open_product", 1)),
-        "port": int(config.get("port", 1)),
+        "port": int(config.get("port", 2)),
         "note": order.call_note or "",
         "refs": [{"designation": designation, "quantity": int(order.quantity)}],
     }
