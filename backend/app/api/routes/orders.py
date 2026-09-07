@@ -45,6 +45,14 @@ def new_order_number() -> str:
 def order_to_dict(db: Session, order: Order) -> dict:
     customer = db.query(Customer).filter(Customer.id == order.customer_id).first()
     product = db.query(Product).filter(Product.id == order.product_id).first()
+    offer = (
+        db.query(ProductOffer)
+        .filter(ProductOffer.id == order.offer_id)
+        .first()
+        if order.offer_id
+        else None
+    )
+    store = db.query(Store).filter(Store.id == order.store_id).first()
     agent = db.query(User).filter(User.id == order.assigned_agent_id).first() if order.assigned_agent_id else None
     data = {c.name: getattr(order, c.name) for c in order.__table__.columns}
     shipment = db.query(DeliveryShipment).filter(DeliveryShipment.order_id == order.id).order_by(DeliveryShipment.created_at.desc()).first()
@@ -53,6 +61,10 @@ def order_to_dict(db: Session, order: Order) -> dict:
         "customer_phone": customer.phone_e164 if customer else None,
         "product_name": product.name if product else None,
         "product_sku": product.sku if product else None,
+        "offer_name": offer.name if offer else None,
+        "offer_quantity": offer.quantity if offer else None,
+        "offer_price": offer.price if offer else None,
+        "store_name": store.name if store else None,
         "agent_name": agent.display_name if agent else None,
         "delivery_provider": shipment.provider if shipment else None,
         "delivery_tracking": shipment.tracking_number if shipment else None,
@@ -91,7 +103,20 @@ def list_orders(
 ):
     q = db.query(Order)
     if user.role == "AGENT":
-        q = q.filter(Order.assigned_agent_id == user.id)
+        allowed_product_ids = [
+            x.product_id
+            for x in db.query(AgentProduct)
+            .filter(AgentProduct.agent_id == user.id)
+            .all()
+        ]
+
+        if not allowed_product_ids:
+            return []
+
+        q = q.filter(
+            Order.assigned_agent_id == user.id,
+            Order.product_id.in_(allowed_product_ids),
+        )
     elif agent_id:
         q = q.filter(Order.assigned_agent_id == agent_id)
     if product_id:
@@ -114,7 +139,21 @@ def my_queue(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("AGENT")),
 ):
-    q = db.query(Order).filter(Order.assigned_agent_id == user.id)
+    allowed_product_ids = [
+        x.product_id
+        for x in db.query(AgentProduct)
+        .filter(AgentProduct.agent_id == user.id)
+        .all()
+    ]
+
+    if not allowed_product_ids:
+        return []
+
+    q = db.query(Order).filter(
+        Order.assigned_agent_id == user.id,
+        Order.product_id.in_(allowed_product_ids),
+    )
+
     bucket = bucket.upper()
     if bucket == "FOLLOW_UP":
         q = q.filter(Order.call_status.in_(["NO_ANSWER", "BUSY", "CALLBACK"]))
