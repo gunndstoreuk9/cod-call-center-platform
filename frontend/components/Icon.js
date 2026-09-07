@@ -6,6 +6,7 @@ export default function Icon({ name, size=18 }) {
     stores:'M3 9l2-6h14l2 6 M5 9v12h14V9 M9 21v-7h6v7',
     agents:'M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2 M9 11a4 4 0 100-8 4 4 0 000 8z M22 21v-2a4 4 0 00-3-3.87 M16 3.13a4 4 0 010 7.75',
     payments:'M12 1v22 M17 5H9.5a3.5 3.5 0 000 7H14a3.5 3.5 0 010 7H6',
+    profit:'M3 18l6-6 4 4 8-10 M16 6h5v5 M4 21h16',
     callbacks:'M21 15a4 4 0 01-4 4H8l-5 3V7a4 4 0 014-4h10a4 4 0 014 4z M8 8h8 M8 12h5',
     integrations:'M8 12h8 M12 8v8 M4 4l4 4 M20 4l-4 4 M4 20l4-4 M20 20l-4-4',
     delivery:'M3 6h11v10H3z M14 9h4l3 3v4h-7z M7 20a2 2 0 100-4 2 2 0 000 4z M19 20a2 2 0 100-4 2 2 0 000 4z',

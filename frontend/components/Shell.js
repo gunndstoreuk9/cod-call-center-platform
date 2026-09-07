@@ -13,6 +13,7 @@ const adminLinks = [
   ['/admin/stores', 'Stores','stores'],
   ['/admin/agents', 'Agents','agents'],
   ['/admin/payments', 'Payments','payments'],
+  ['/admin/profit', 'Profit Center','profit'],
   ['/admin/callbacks', 'Callbacks','callbacks'],
   ['/admin/integrations', 'Integrations','integrations'],
   ['/admin/delivery', 'Live Delivery','delivery']

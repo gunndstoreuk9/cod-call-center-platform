@@ -4,6 +4,7 @@ import uuid
 from decimal import Decimal
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -95,6 +96,67 @@ class Product(Base):
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class AdSpend(Base):
+    __tablename__ = "ad_spend"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str
+    )
+
+    store_id: Mapped[str] = mapped_column(
+        ForeignKey("stores.id", ondelete="RESTRICT"),
+        index=True
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey("products.id", ondelete="RESTRICT"),
+        index=True
+    )
+
+    spend_date: Mapped[object] = mapped_column(
+        Date,
+        index=True
+    )
+
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2)
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(3),
+        default="MAD"
+    )
+
+    platform: Mapped[str] = mapped_column(
+        String(40),
+        default="META",
+        index=True
+    )
+
+    campaign_name: Mapped[str | None] = mapped_column(
+        String(180),
+        nullable=True
+    )
+
+    note: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True
+    )
+
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True
+    )
 
 
 class ProductCostHistory(Base):
