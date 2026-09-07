@@ -168,6 +168,46 @@ def update_integration(
     return _out(row)
 
 
+@router.delete("/{integration_id}")
+def delete_integration(
+    integration_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OWNER", "ADMIN")),
+):
+    row = _integration_or_404(db, integration_id)
+
+    # Safety: active integrations must be disabled before deletion.
+    if row.is_active:
+        raise HTTPException(
+            400,
+            "Disable this integration before deleting it"
+        )
+
+    before = {
+        "provider": row.provider,
+        "name": row.name,
+        "store_id": row.store_id,
+        "is_active": row.is_active,
+    }
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="INTEGRATION_DELETED",
+        entity_type="INTEGRATION",
+        entity_id=row.id,
+        before=before,
+    )
+
+    db.delete(row)
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted_id": integration_id
+    }
+
+
 @router.get("/{integration_id}/webhook-config")
 def webhook_config(
     integration_id: str,
