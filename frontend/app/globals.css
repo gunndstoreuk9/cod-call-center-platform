@@ -2301,3 +2301,56 @@ html[dir="rtl"] .tw-agent .tw-list-head h2{
   font-weight:700;
 }
 
+
+/* FIX — Agent product image spacing */
+.tw-product-box{
+  display:grid !important;
+  grid-template-columns:56px minmax(0,1fr) auto !important;
+  align-items:center !important;
+  gap:14px !important;
+  padding:12px 14px !important;
+}
+
+.tw-product-avatar{
+  width:56px !important;
+  height:56px !important;
+  flex:none !important;
+  margin:0 !important;
+}
+
+.tw-product-main{
+  min-width:0 !important;
+  padding:0 !important;
+}
+
+.tw-product-main strong{
+  display:block !important;
+  line-height:1.45 !important;
+  margin-top:2px !important;
+  overflow-wrap:anywhere !important;
+}
+
+.tw-product-main small{
+  display:block !important;
+  margin-top:3px !important;
+  line-height:1.35 !important;
+}
+
+.tw-product-price{
+  min-width:58px !important;
+  padding-inline-start:8px !important;
+  text-align:end !important;
+}
+
+html[dir="rtl"] .tw-product-box{
+  direction:rtl !important;
+}
+
+html[dir="rtl"] .tw-product-main{
+  text-align:right !important;
+}
+
+html[dir="ltr"] .tw-product-main{
+  text-align:left !important;
+}
+
