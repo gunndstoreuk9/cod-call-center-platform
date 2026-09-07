@@ -34,7 +34,7 @@ from app.services.payouts import reconcile_confirmation_payout
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
-CALL_STATUSES = {"NEW", "NO_ANSWER", "BUSY", "CALLBACK", "CONFIRMED", "CANCELLED", "WRONG_NUMBER", "DUPLICATE", "BLACKLIST", "NOT_INTERESTED"}
+CALL_STATUSES = {"NEW", "NO_ANSWER", "VOICEMAIL", "BUSY", "CALLBACK", "CONFIRMED", "CANCELLED", "WRONG_NUMBER", "DUPLICATE", "BLACKLIST", "NOT_INTERESTED"}
 DELIVERY_STATUSES = {"NOT_READY", "READY", "DISPATCHED", "IN_TRANSIT", "OUT_FOR_DELIVERY", "DELIVERED", "REFUSED", "RETURNED", "CANCELLED", "ISSUE"}
 
 
@@ -80,11 +80,42 @@ def assert_order_access(order: Order, user: User) -> None:
 
 def apply_status_side_effects(order: Order, previous_call: str | None = None, previous_delivery: str | None = None) -> None:
     now = utcnow()
-    if order.call_status == "CONFIRMED" and previous_call != "CONFIRMED" and not order.confirmed_at:
-        order.confirmed_at = now
-    if order.delivery_status == "DISPATCHED" and previous_delivery != "DISPATCHED" and not order.dispatched_at:
+
+    # Confirmation means ready for delivery, not automatically dispatched.
+    if order.call_status == "CONFIRMED":
+        if previous_call != "CONFIRMED" and not order.confirmed_at:
+            order.confirmed_at = now
+
+        if order.delivery_status in {"NOT_READY", "ISSUE"}:
+            order.delivery_status = "READY"
+
+    # Follow-up / closed outcomes are not ready for delivery.
+    elif order.call_status in {
+        "NEW",
+        "NO_ANSWER",
+        "VOICEMAIL",
+        "BUSY",
+        "CALLBACK",
+        "CANCELLED",
+        "WRONG_NUMBER",
+        "DUPLICATE",
+        "NOT_INTERESTED",
+    }:
+        if order.delivery_status == "READY":
+            order.delivery_status = "NOT_READY"
+
+    if (
+        order.delivery_status == "DISPATCHED"
+        and previous_delivery != "DISPATCHED"
+        and not order.dispatched_at
+    ):
         order.dispatched_at = now
-    if order.delivery_status == "DELIVERED" and previous_delivery != "DELIVERED" and not order.delivered_at:
+
+    if (
+        order.delivery_status == "DELIVERED"
+        and previous_delivery != "DELIVERED"
+        and not order.delivered_at
+    ):
         order.delivered_at = now
 
 
@@ -155,14 +186,882 @@ def my_queue(
     )
 
     bucket = bucket.upper()
+
     if bucket == "FOLLOW_UP":
-        q = q.filter(Order.call_status.in_(["NO_ANSWER", "BUSY", "CALLBACK"]))
+        q = q.filter(
+            Order.call_status.in_([
+                "NO_ANSWER",
+                "VOICEMAIL",
+                "BUSY",
+                "CALLBACK",
+            ])
+        )
+
+    elif bucket in {"READY", "READY_TO_SEND"}:
+        q = q.filter(
+            Order.call_status == "CONFIRMED",
+            Order.delivery_status == "READY",
+        )
+
+    elif bucket in {"CLOSED", "DRAFT"}:
+        q = q.filter(
+            Order.call_status.in_([
+                "CANCELLED",
+                "WRONG_NUMBER",
+                "DUPLICATE",
+                "NOT_INTERESTED",
+            ])
+        )
+
     elif bucket == "CONFIRMED":
-        q = q.filter(Order.call_status == "CONFIRMED")
+        q = q.filter(
+            Order.call_status == "CONFIRMED"
+        )
+
     elif bucket != "ALL":
-        q = q.filter(Order.call_status == bucket)
+        q = q.filter(
+            Order.call_status == bucket
+        )
     return [order_to_dict(db, x) for x in q.order_by(Order.created_at.asc()).limit(min(limit, 200)).all()]
 
+
+
+
+
+# ============================================================
+# AGENT BOARD — TAWAZONE-STYLE OPERATIONAL API
+# ============================================================
+
+AGENT_FOLLOW_UP_STATUSES = {
+    "NO_ANSWER",
+    "VOICEMAIL",
+    "BUSY",
+    "CALLBACK",
+}
+
+AGENT_CLOSED_STATUSES = {
+    "CANCELLED",
+    "WRONG_NUMBER",
+    "DUPLICATE",
+    "NOT_INTERESTED",
+}
+
+AGENT_ALLOWED_OUTCOMES = {
+    "CONFIRMED",
+    "NO_ANSWER",
+    "VOICEMAIL",
+    "BUSY",
+    "CALLBACK",
+    "CANCELLED",
+    "WRONG_NUMBER",
+    "DUPLICATE",
+    "NOT_INTERESTED",
+}
+
+AGENT_LOCKED_DELIVERY_STATUSES = {
+    "DISPATCHED",
+    "IN_TRANSIT",
+    "OUT_FOR_DELIVERY",
+    "DELIVERED",
+}
+
+
+def _agent_allowed_product_ids(
+    db: Session,
+    agent_id: str,
+) -> list[str]:
+    return [
+        x.product_id
+        for x in (
+            db.query(AgentProduct)
+            .filter(
+                AgentProduct.agent_id == agent_id
+            )
+            .all()
+        )
+    ]
+
+
+def _apply_agent_bucket(query, bucket: str):
+    bucket = (bucket or "NEW").upper()
+
+    if bucket == "NEW":
+        return query.filter(
+            Order.call_status == "NEW"
+        )
+
+    if bucket == "FOLLOW_UP":
+        return query.filter(
+            Order.call_status.in_(
+                list(AGENT_FOLLOW_UP_STATUSES)
+            )
+        )
+
+    if bucket in {"READY", "READY_TO_SEND"}:
+        return query.filter(
+            Order.call_status == "CONFIRMED",
+            Order.delivery_status == "READY",
+        )
+
+    if bucket == "BLACKLIST":
+        return query.filter(
+            Order.call_status == "BLACKLIST"
+        )
+
+    if bucket in {"CLOSED", "DRAFT"}:
+        return query.filter(
+            Order.call_status.in_(
+                list(AGENT_CLOSED_STATUSES)
+            )
+        )
+
+    if bucket == "SENT":
+        return query.filter(
+            Order.delivery_status.in_([
+                "DISPATCHED",
+                "IN_TRANSIT",
+                "OUT_FOR_DELIVERY",
+                "DELIVERED",
+            ])
+        )
+
+    if bucket == "ALL":
+        return query
+
+    raise HTTPException(
+        400,
+        "Invalid agent board bucket",
+    )
+
+
+def _agent_board_order(
+    db: Session,
+    order: Order,
+) -> dict:
+    data = order_to_dict(db, order)
+
+    active_offers = (
+        db.query(ProductOffer)
+        .filter(
+            ProductOffer.product_id == order.product_id,
+            ProductOffer.is_active.is_(True),
+        )
+        .order_by(
+            ProductOffer.quantity.asc(),
+            ProductOffer.created_at.asc(),
+        )
+        .all()
+    )
+
+    attempts = (
+        db.query(CallAttempt)
+        .filter(
+            CallAttempt.order_id == order.id
+        )
+        .order_by(
+            CallAttempt.created_at.desc()
+        )
+        .all()
+    )
+
+    data["attempt_count"] = len(attempts)
+
+    data["last_attempt"] = (
+        {
+            "outcome": attempts[0].outcome,
+            "note": attempts[0].note,
+            "created_at": attempts[0].created_at,
+        }
+        if attempts
+        else None
+    )
+
+    data["available_offers"] = [
+        {
+            "id": offer.id,
+            "name": offer.name,
+            "quantity": offer.quantity,
+            "price": offer.price,
+        }
+        for offer in active_offers
+    ]
+
+    data["editable"] = (
+        order.delivery_status
+        not in AGENT_LOCKED_DELIVERY_STATUSES
+        and not data.get("delivery_tracking")
+    )
+
+    return data
+
+
+@router.get("/agent-board")
+def agent_board(
+    bucket: str = "NEW",
+    product_id: str | None = None,
+    search: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("AGENT")),
+):
+    """
+    One API for the entire Agent Workspace.
+
+    Returns:
+    - current bucket orders
+    - dynamic product filters
+    - queue counts
+    - active Product Offers
+    - call attempt count
+    """
+
+    allowed_product_ids = _agent_allowed_product_ids(
+        db,
+        user.id,
+    )
+
+    if not allowed_product_ids:
+        return {
+            "counts": {
+                "new": 0,
+                "follow_up": 0,
+                "ready": 0,
+                "blacklist": 0,
+                "closed": 0,
+                "sent": 0,
+                "all": 0,
+            },
+            "products": [],
+            "orders": [],
+        }
+
+    base = db.query(Order).filter(
+        Order.assigned_agent_id == user.id,
+        Order.product_id.in_(
+            allowed_product_ids
+        ),
+    )
+
+    def count_bucket(name: str) -> int:
+        return _apply_agent_bucket(
+            base,
+            name,
+        ).count()
+
+    counts = {
+        "new": count_bucket("NEW"),
+        "follow_up": count_bucket("FOLLOW_UP"),
+        "ready": count_bucket("READY"),
+        "blacklist": count_bucket("BLACKLIST"),
+        "closed": count_bucket("CLOSED"),
+        "sent": count_bucket("SENT"),
+        "all": base.count(),
+    }
+
+    q = _apply_agent_bucket(
+        base,
+        bucket,
+    )
+
+    # Product counters follow the selected tab/bucket.
+    product_count_rows = q.all()
+
+    product_counts: dict[str, int] = {}
+
+    for row in product_count_rows:
+        product_counts[row.product_id] = (
+            product_counts.get(
+                row.product_id,
+                0,
+            )
+            + 1
+        )
+
+    products = (
+        db.query(Product)
+        .filter(
+            Product.id.in_(
+                allowed_product_ids
+            ),
+            Product.status == "ACTIVE",
+        )
+        .order_by(Product.name.asc())
+        .all()
+    )
+
+    product_filters = [
+        {
+            "id": product.id,
+            "name": product.name,
+            "sku": product.sku,
+            "image_url": product.image_url,
+            "currency": product.currency,
+            "count": product_counts.get(
+                product.id,
+                0,
+            ),
+        }
+        for product in products
+    ]
+
+    if product_id:
+        if product_id not in allowed_product_ids:
+            raise HTTPException(
+                403,
+                "You do not have access to this product",
+            )
+
+        q = q.filter(
+            Order.product_id == product_id
+        )
+
+    if search:
+        term = search.strip()
+
+        if term:
+            customer_ids = [
+                customer.id
+                for customer in (
+                    db.query(Customer)
+                    .filter(
+                        or_(
+                            Customer.name.ilike(
+                                f"%{term}%"
+                            ),
+                            Customer.phone_e164.ilike(
+                                f"%{term}%"
+                            ),
+                            Customer.phone_raw.ilike(
+                                f"%{term}%"
+                            ),
+                        )
+                    )
+                    .all()
+                )
+            ]
+
+            q = q.filter(
+                or_(
+                    Order.order_number.ilike(
+                        f"%{term}%"
+                    ),
+                    Order.city.ilike(
+                        f"%{term}%"
+                    ),
+                    Order.address.ilike(
+                        f"%{term}%"
+                    ),
+                    Order.customer_id.in_(
+                        customer_ids
+                    ),
+                )
+            )
+
+    rows = (
+        q.order_by(
+            Order.created_at.asc()
+        )
+        .offset(max(offset, 0))
+        .limit(
+            min(
+                max(limit, 1),
+                200,
+            )
+        )
+        .all()
+    )
+
+    return {
+        "bucket": bucket.upper(),
+        "counts": counts,
+        "products": product_filters,
+        "orders": [
+            _agent_board_order(
+                db,
+                row,
+            )
+            for row in rows
+        ],
+    }
+
+
+@router.post("/agent-workflow/{order_id}")
+def agent_workflow(
+    order_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("AGENT")),
+):
+    """
+    Atomic Agent Workspace save / call-result action.
+
+    Product Offers are the only source of truth for
+    offer quantity and total price.
+    """
+
+    allowed_fields = {
+        "customer_name",
+        "phone",
+        "city",
+        "address",
+        "offer_id",
+        "call_note",
+        "outcome",
+    }
+
+    unknown = (
+        set(payload.keys())
+        - allowed_fields
+    )
+
+    if unknown:
+        raise HTTPException(
+            400,
+            "Unsupported fields: "
+            + ", ".join(
+                sorted(unknown)
+            ),
+        )
+
+    row = (
+        db.query(Order)
+        .filter(
+            Order.id == order_id
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(
+            404,
+            "Order not found",
+        )
+
+    assert_order_access(
+        row,
+        user,
+    )
+
+    allowed_product = (
+        db.query(AgentProduct)
+        .filter(
+            AgentProduct.agent_id == user.id,
+            AgentProduct.product_id
+            == row.product_id,
+        )
+        .first()
+    )
+
+    if not allowed_product:
+        raise HTTPException(
+            403,
+            "You no longer have access to this product",
+        )
+
+    shipment = (
+        db.query(DeliveryShipment)
+        .filter(
+            DeliveryShipment.order_id
+            == row.id
+        )
+        .order_by(
+            DeliveryShipment.created_at.desc()
+        )
+        .first()
+    )
+
+    if (
+        row.delivery_status
+        in AGENT_LOCKED_DELIVERY_STATUSES
+        or (
+            shipment
+            and shipment.tracking_number
+        )
+    ):
+        raise HTTPException(
+            409,
+            "This order was already sent to delivery and is locked for agent editing",
+        )
+
+    customer = (
+        db.query(Customer)
+        .filter(
+            Customer.id == row.customer_id
+        )
+        .first()
+    )
+
+    store = (
+        db.query(Store)
+        .filter(
+            Store.id == row.store_id
+        )
+        .first()
+    )
+
+    product = (
+        db.query(Product)
+        .filter(
+            Product.id == row.product_id
+        )
+        .first()
+    )
+
+    if not customer or not store or not product:
+        raise HTTPException(
+            400,
+            "Order customer/store/product data is incomplete",
+        )
+
+    previous_call = row.call_status
+    previous_delivery = (
+        row.delivery_status
+    )
+
+    # ----------------------------------------------
+    # Customer name
+    # ----------------------------------------------
+
+    if "customer_name" in payload:
+        name = str(
+            payload.get(
+                "customer_name"
+            )
+            or ""
+        ).strip()
+
+        if not name:
+            raise HTTPException(
+                400,
+                "Customer name is required",
+            )
+
+        customer.name = name
+
+    # ----------------------------------------------
+    # Phone
+    # ----------------------------------------------
+
+    if "phone" in payload:
+        raw_phone = str(
+            payload.get("phone")
+            or ""
+        ).strip()
+
+        if not raw_phone:
+            raise HTTPException(
+                400,
+                "Phone number is required",
+            )
+
+        normalized = normalize_phone(
+            raw_phone,
+            store.country,
+        )
+
+        duplicate_customer = (
+            db.query(Customer)
+            .filter(
+                Customer.phone_e164
+                == normalized,
+                Customer.id
+                != customer.id,
+            )
+            .first()
+        )
+
+        if duplicate_customer:
+            raise HTTPException(
+                409,
+                "Another customer already uses this phone number",
+            )
+
+        customer.phone_raw = raw_phone
+        customer.phone_e164 = normalized
+
+    # ----------------------------------------------
+    # Digylog City
+    # ----------------------------------------------
+
+    if "city" in payload:
+        city_input = str(
+            payload.get("city")
+            or ""
+        ).strip()
+
+        if city_input:
+            city = canonical_digylog_city(
+                city_input
+            )
+
+            if not city:
+                raise HTTPException(
+                    400,
+                    "Select a valid Digylog city",
+                )
+
+            row.city = city
+            customer.city = city
+
+        else:
+            row.city = None
+            customer.city = None
+
+    # ----------------------------------------------
+    # Address
+    # ----------------------------------------------
+
+    if "address" in payload:
+        address = str(
+            payload.get("address")
+            or ""
+        ).strip()
+
+        row.address = (
+            address or None
+        )
+        customer.address = (
+            address or None
+        )
+
+    # ----------------------------------------------
+    # Note
+    # ----------------------------------------------
+
+    if "call_note" in payload:
+        note = str(
+            payload.get("call_note")
+            or ""
+        ).strip()
+
+        row.call_note = (
+            note or None
+        )
+
+    # ----------------------------------------------
+    # Product Offer
+    # ----------------------------------------------
+
+    if "offer_id" in payload:
+        offer_id = (
+            str(
+                payload.get(
+                    "offer_id"
+                )
+                or ""
+            ).strip()
+        )
+
+        if not offer_id:
+            row.offer_id = None
+
+        else:
+            offer = (
+                db.query(ProductOffer)
+                .filter(
+                    ProductOffer.id
+                    == offer_id,
+                    ProductOffer.product_id
+                    == row.product_id,
+                    ProductOffer.is_active.is_(
+                        True
+                    ),
+                )
+                .first()
+            )
+
+            if not offer:
+                raise HTTPException(
+                    400,
+                    "Invalid or inactive offer for this product",
+                )
+
+            row.offer_id = offer.id
+            row.quantity = offer.quantity
+
+            # Offer price is the full bundle/order total.
+            row.total_price = offer.price
+
+            row.unit_price = (
+                offer.price
+                / offer.quantity
+            )
+
+    # ----------------------------------------------
+    # Call outcome
+    # ----------------------------------------------
+
+    outcome_raw = payload.get(
+        "outcome"
+    )
+
+    outcome = (
+        str(outcome_raw)
+        .strip()
+        .upper()
+        if outcome_raw
+        else None
+    )
+
+    if outcome:
+        if outcome not in AGENT_ALLOWED_OUTCOMES:
+            raise HTTPException(
+                400,
+                "Invalid agent call outcome",
+            )
+
+        # Confirmation requires complete validated data.
+        if outcome == "CONFIRMED":
+            selected_offer = (
+                db.query(ProductOffer)
+                .filter(
+                    ProductOffer.id
+                    == row.offer_id,
+                    ProductOffer.product_id
+                    == row.product_id,
+                    ProductOffer.is_active.is_(
+                        True
+                    ),
+                )
+                .first()
+                if row.offer_id
+                else None
+            )
+
+            if not selected_offer:
+                raise HTTPException(
+                    400,
+                    "Select an active product offer before confirmation",
+                )
+
+            if not customer.name.strip():
+                raise HTTPException(
+                    400,
+                    "Customer name is required before confirmation",
+                )
+
+            if not customer.phone_e164:
+                raise HTTPException(
+                    400,
+                    "Customer phone is required before confirmation",
+                )
+
+            if not row.city:
+                raise HTTPException(
+                    400,
+                    "Select the Digylog city before confirmation",
+                )
+
+            if not (
+                row.address
+                and row.address.strip()
+            ):
+                raise HTTPException(
+                    400,
+                    "Customer address is required before confirmation",
+                )
+
+            # Re-apply current offer from DB.
+            # Browser never decides qty or price.
+            row.quantity = (
+                selected_offer.quantity
+            )
+            row.total_price = (
+                selected_offer.price
+            )
+            row.unit_price = (
+                selected_offer.price
+                / selected_offer.quantity
+            )
+
+            row.call_status = "CONFIRMED"
+            row.delivery_status = "READY"
+
+        elif outcome in AGENT_FOLLOW_UP_STATUSES:
+            row.call_status = outcome
+            row.delivery_status = "NOT_READY"
+
+        elif outcome in AGENT_CLOSED_STATUSES:
+            row.call_status = outcome
+            row.delivery_status = "NOT_READY"
+
+        attempt = CallAttempt(
+            order_id=row.id,
+            agent_id=user.id,
+            channel="PHONE",
+            outcome=outcome,
+            note=row.call_note,
+            started_at=utcnow(),
+            ended_at=utcnow(),
+            duration_seconds=None,
+        )
+
+        db.add(attempt)
+
+        if not row.first_call_at:
+            row.first_call_at = (
+                attempt.started_at
+            )
+
+    apply_status_side_effects(
+        row,
+        previous_call=previous_call,
+        previous_delivery=previous_delivery,
+    )
+
+    if (
+        row.call_status
+        != previous_call
+        or row.delivery_status
+        != previous_delivery
+    ):
+        db.add(
+            OrderStatusHistory(
+                order_id=row.id,
+                from_call_status=previous_call,
+                to_call_status=row.call_status,
+                from_delivery_status=previous_delivery,
+                to_delivery_status=row.delivery_status,
+                changed_by_user_id=user.id,
+                reason=row.call_note,
+            )
+        )
+
+    reconcile_confirmation_payout(
+        db,
+        row,
+    )
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="AGENT_ORDER_WORKFLOW",
+        entity_type="ORDER",
+        entity_id=row.id,
+        before={
+            "call_status": previous_call,
+            "delivery_status": previous_delivery,
+        },
+        after={
+            "call_status": row.call_status,
+            "delivery_status": row.delivery_status,
+            "offer_id": row.offer_id,
+            "quantity": row.quantity,
+            "total_price": str(
+                row.total_price
+            ),
+            "city": row.city,
+        },
+    )
+
+    db.commit()
+    db.refresh(row)
+
+    return _agent_board_order(
+        db,
+        row,
+    )
 
 
 @lru_cache(maxsize=1)
@@ -780,12 +1679,31 @@ def add_call_attempt(
     )
     db.add(attempt)
     previous = row.call_status
+    previous_delivery = row.delivery_status
+
     row.call_status = outcome
     row.call_note = payload.note or row.call_note
+
     if not row.first_call_at:
         row.first_call_at = started
-    apply_status_side_effects(row, previous_call=previous)
-    db.add(OrderStatusHistory(order_id=row.id, from_call_status=previous, to_call_status=outcome, from_delivery_status=row.delivery_status, to_delivery_status=row.delivery_status, changed_by_user_id=user.id, reason=payload.note))
+
+    apply_status_side_effects(
+        row,
+        previous_call=previous,
+        previous_delivery=previous_delivery,
+    )
+
+    db.add(
+        OrderStatusHistory(
+            order_id=row.id,
+            from_call_status=previous,
+            to_call_status=outcome,
+            from_delivery_status=previous_delivery,
+            to_delivery_status=row.delivery_status,
+            changed_by_user_id=user.id,
+            reason=payload.note,
+        )
+    )
     reconcile_confirmation_payout(db, row)
     log_action(db, user_id=user.id, action="CALL_ATTEMPT_CREATED", entity_type="ORDER", entity_id=row.id, after={"outcome": outcome, "duration_seconds": payload.duration_seconds})
     db.commit()
