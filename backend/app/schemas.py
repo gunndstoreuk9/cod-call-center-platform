@@ -78,6 +78,8 @@ class ProductCreate(BaseModel):
     sku: str
     image_url: str | None = None
     selling_price: Decimal = Field(ge=0)
+    unit_cost: Decimal = Field(default=Decimal("0"), ge=0)
+    packaging_cost: Decimal = Field(default=Decimal("0"), ge=0)
     currency: str = "MAD"
     default_qty: int = Field(default=1, ge=1)
     delivery_product_ref: str | None = None
@@ -92,6 +94,8 @@ class ProductUpdate(BaseModel):
     sku: str | None = None
     image_url: str | None = None
     selling_price: Decimal | None = Field(default=None, ge=0)
+    unit_cost: Decimal | None = Field(default=None, ge=0)
+    packaging_cost: Decimal | None = Field(default=None, ge=0)
     currency: str | None = None
     default_qty: int | None = Field(default=None, ge=1)
     delivery_product_ref: str | None = None
@@ -106,6 +110,8 @@ class ProductOut(ORMModel):
     sku: str
     image_url: str | None
     selling_price: Decimal
+    unit_cost: Decimal
+    packaging_cost: Decimal
     currency: str
     default_qty: int
     delivery_product_ref: str | None

@@ -76,6 +76,18 @@ class Product(Base):
     sku: Mapped[str] = mapped_column(String(100), unique=True, index=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     selling_price: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0"))
+
+    # Profit Center current cost snapshot.
+    # Historical changes are stored in product_cost_history.
+    unit_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        default=Decimal("0")
+    )
+    packaging_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        default=Decimal("0")
+    )
+
     currency: Mapped[str] = mapped_column(String(3), default="MAD")
     default_qty: Mapped[int] = mapped_column(Integer, default=1)
     delivery_product_ref: Mapped[str | None] = mapped_column(String(150), nullable=True)
@@ -83,6 +95,47 @@ class Product(Base):
     status: Mapped[str] = mapped_column(String(20), default="ACTIVE", index=True)
     created_at: Mapped[object] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
+class ProductCostHistory(Base):
+    __tablename__ = "product_cost_history"
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True
+    )
+
+    unit_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        default=Decimal("0")
+    )
+
+    packaging_cost: Mapped[Decimal] = mapped_column(
+        Numeric(12, 2),
+        default=Decimal("0")
+    )
+
+    effective_from: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        index=True
+    )
+
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True
+    )
 
 
 class ProductOffer(Base):

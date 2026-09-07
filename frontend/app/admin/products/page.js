@@ -12,6 +12,8 @@ const emptyProduct = {
   sku: '',
   image_url: '',
   selling_price: '',
+  unit_cost: '',
+  packaging_cost: '',
   currency: 'MAD',
   default_qty: 1,
   delivery_product_ref: '',
@@ -114,6 +116,8 @@ export default function ProductsPage() {
       sku: p.sku,
       image_url: p.image_url || '',
       selling_price: p.selling_price,
+      unit_cost: p.unit_cost ?? 0,
+      packaging_cost: p.packaging_cost ?? 0,
       currency: p.currency,
       default_qty: p.default_qty,
       delivery_product_ref:
@@ -137,6 +141,17 @@ export default function ProductsPage() {
         ...form,
         selling_price:
           Number(form.selling_price),
+
+        unit_cost:
+          form.unit_cost === ''
+            ? 0
+            : Number(form.unit_cost),
+
+        packaging_cost:
+          form.packaging_cost === ''
+            ? 0
+            : Number(form.packaging_cost),
+
         default_qty:
           Number(form.default_qty),
         commission_per_confirmation:
@@ -413,6 +428,8 @@ export default function ProductsPage() {
                 <th>{t('Product')}</th>
                 <th>{t('SKU')}</th>
                 <th>{t('Base Price')}</th>
+                <th>Cost / Unit</th>
+                <th>Packaging</th>
                 <th>{t('Delivery Ref')}</th>
                 <th>{t('Commission')}</th>
                 <th>{t('Offers')}</th>
@@ -444,6 +461,34 @@ export default function ProductsPage() {
                       p.selling_price,
                       p.currency
                     )}
+                  </td>
+
+                  <td>
+                    <strong>
+                      {money(
+                        p.unit_cost ?? 0,
+                        p.currency
+                      )}
+                    </strong>
+
+                    <br />
+
+                    <small>
+                      per unit
+                    </small>
+                  </td>
+
+                  <td>
+                    {money(
+                      p.packaging_cost ?? 0,
+                      p.currency
+                    )}
+
+                    <br />
+
+                    <small>
+                      per order
+                    </small>
                   </td>
 
                   <td>
@@ -540,7 +585,7 @@ export default function ProductsPage() {
 
               {products.length === 0 && (
                 <tr>
-                  <td colSpan="8">
+                  <td colSpan="10">
                     <div className="empty">
                       No products yet.
                     </div>
@@ -648,6 +693,56 @@ export default function ProductsPage() {
               <small>
                 Agent offer prices are managed
                 separately in Offers.
+              </small>
+            </div>
+
+            <div className="field">
+              <label>
+                Cost / Unit
+              </label>
+
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="0.00"
+                value={form.unit_cost}
+                onChange={e =>
+                  setForm({
+                    ...form,
+                    unit_cost:
+                      e.target.value
+                  })
+                }
+              />
+
+              <small>
+                Product purchase cost for one unit.
+              </small>
+            </div>
+
+            <div className="field">
+              <label>
+                Packaging Cost / Order
+              </label>
+
+              <input
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="0.00"
+                value={form.packaging_cost}
+                onChange={e =>
+                  setForm({
+                    ...form,
+                    packaging_cost:
+                      e.target.value
+                  })
+                }
+              />
+
+              <small>
+                Packaging cost applied once per delivered order.
               </small>
             </div>
 

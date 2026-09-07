@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.deps import current_user, require_roles
-from app.models import Order, Product, ProductOffer, Store, User
+from app.core.time import utcnow
+from app.models import Order, Product, ProductCostHistory, ProductOffer, Store, User
 from app.schemas import OfferCreate, OfferOut, ProductCreate, ProductOut, ProductUpdate
 from app.services.audit import log_action
 
@@ -49,6 +50,17 @@ def create_product(
     row = Product(**data)
     db.add(row)
     db.flush()
+
+    # First product cost history
+    db.add(
+        ProductCostHistory(
+            product_id=row.id,
+            unit_cost=row.unit_cost,
+            packaging_cost=row.packaging_cost,
+            effective_from=row.created_at or utcnow(),
+            created_by_user_id=user.id,
+        )
+    )
     for offer in payload.offers:
         db.add(ProductOffer(product_id=row.id, **offer.model_dump()))
     log_action(db, user_id=user.id, action="PRODUCT_CREATED", entity_type="PRODUCT", entity_id=row.id, after={"name": row.name, "sku": row.sku})
@@ -68,6 +80,9 @@ def update_product(
     if not row:
         raise HTTPException(404, "Product not found")
     before = {"name": row.name, "sku": row.sku, "status": row.status, "price": str(row.selling_price)}
+    previous_unit_cost = row.unit_cost
+    previous_packaging_cost = row.packaging_cost
+
     updates = payload.model_dump(exclude_unset=True)
     if "sku" in updates and updates["sku"]:
         updates["sku"] = updates["sku"].strip().upper()
@@ -76,11 +91,85 @@ def update_product(
             raise HTTPException(409, "SKU already exists")
     for key, value in updates.items():
         setattr(row, key, value)
+
+    cost_changed = (
+        row.unit_cost != previous_unit_cost
+        or row.packaging_cost != previous_packaging_cost
+    )
+
+    if cost_changed:
+        existing_history = (
+            db.query(ProductCostHistory)
+            .filter(
+                ProductCostHistory.product_id == row.id
+            )
+            .first()
+        )
+
+        effective_from = (
+            row.created_at
+            if existing_history is None
+            else utcnow()
+        )
+
+        db.add(
+            ProductCostHistory(
+                product_id=row.id,
+                unit_cost=row.unit_cost,
+                packaging_cost=row.packaging_cost,
+                effective_from=effective_from,
+                created_by_user_id=user.id,
+            )
+        )
     log_action(db, user_id=user.id, action="PRODUCT_UPDATED", entity_type="PRODUCT", entity_id=row.id, before=before, after={"name": row.name, "sku": row.sku, "status": row.status, "price": str(row.selling_price)})
     db.commit()
     db.refresh(row)
     return product_payload(db, row)
 
+
+@router.get("/{product_id}/cost-history")
+def product_cost_history(
+    product_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles("OWNER", "ADMIN")
+    ),
+):
+    product = (
+        db.query(Product)
+        .filter(Product.id == product_id)
+        .first()
+    )
+
+    if not product:
+        raise HTTPException(
+            404,
+            "Product not found"
+        )
+
+    rows = (
+        db.query(ProductCostHistory)
+        .filter(
+            ProductCostHistory.product_id == product_id
+        )
+        .order_by(
+            ProductCostHistory.effective_from.desc()
+        )
+        .all()
+    )
+
+    return [
+        {
+            "id": row.id,
+            "product_id": row.product_id,
+            "unit_cost": row.unit_cost,
+            "packaging_cost": row.packaging_cost,
+            "effective_from": row.effective_from,
+            "created_by_user_id": row.created_by_user_id,
+            "created_at": row.created_at,
+        }
+        for row in rows
+    ]
 
 @router.post("/{product_id}/offers", response_model=OfferOut)
 def create_offer(
