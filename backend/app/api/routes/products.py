@@ -1,8 +1,10 @@
+from decimal import Decimal, InvalidOperation
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.deps import current_user, require_roles
-from app.models import Product, ProductOffer, Store, User
+from app.models import Order, Product, ProductOffer, Store, User
 from app.schemas import OfferCreate, OfferOut, ProductCreate, ProductOut, ProductUpdate
 from app.services.audit import log_action
 
@@ -96,3 +98,241 @@ def create_offer(
     db.commit()
     db.refresh(row)
     return row
+
+
+def _offer_or_404(
+    db: Session,
+    product_id: str,
+    offer_id: str,
+) -> ProductOffer:
+    row = (
+        db.query(ProductOffer)
+        .filter(
+            ProductOffer.id == offer_id,
+            ProductOffer.product_id == product_id,
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(404, "Offer not found")
+
+    return row
+
+
+@router.patch("/{product_id}/offers/{offer_id}", response_model=OfferOut)
+def update_offer(
+    product_id: str,
+    offer_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OWNER", "ADMIN")),
+):
+    """
+    Update one Product Offer.
+
+    Product offers are the single source of truth
+    for quantity and offer pricing used by Agent Workspace.
+    """
+
+    row = _offer_or_404(
+        db,
+        product_id,
+        offer_id,
+    )
+
+    before = {
+        "name": row.name,
+        "quantity": row.quantity,
+        "price": str(row.price),
+        "commission_override": (
+            str(row.commission_override)
+            if row.commission_override is not None
+            else None
+        ),
+        "is_active": row.is_active,
+    }
+
+    allowed = {
+        "name",
+        "quantity",
+        "price",
+        "commission_override",
+        "is_active",
+    }
+
+    unknown = set(payload.keys()) - allowed
+
+    if unknown:
+        raise HTTPException(
+            400,
+            f"Unsupported offer fields: {', '.join(sorted(unknown))}",
+        )
+
+    if "name" in payload:
+        name = str(payload["name"] or "").strip()
+
+        if not name:
+            raise HTTPException(
+                400,
+                "Offer name is required",
+            )
+
+        if len(name) > 120:
+            raise HTTPException(
+                400,
+                "Offer name is too long",
+            )
+
+        row.name = name
+
+    if "quantity" in payload:
+        try:
+            quantity = int(payload["quantity"])
+        except (TypeError, ValueError):
+            raise HTTPException(
+                400,
+                "Quantity must be a number",
+            )
+
+        if quantity < 1 or quantity > 1000:
+            raise HTTPException(
+                400,
+                "Quantity must be between 1 and 1000",
+            )
+
+        row.quantity = quantity
+
+    if "price" in payload:
+        try:
+            price = Decimal(str(payload["price"]))
+        except (InvalidOperation, TypeError, ValueError):
+            raise HTTPException(
+                400,
+                "Invalid offer price",
+            )
+
+        if price < 0:
+            raise HTTPException(
+                400,
+                "Offer price cannot be negative",
+            )
+
+        row.price = price
+
+    if "commission_override" in payload:
+        value = payload["commission_override"]
+
+        if value in (None, ""):
+            row.commission_override = None
+        else:
+            try:
+                commission = Decimal(str(value))
+            except (InvalidOperation, TypeError, ValueError):
+                raise HTTPException(
+                    400,
+                    "Invalid commission override",
+                )
+
+            if commission < 0:
+                raise HTTPException(
+                    400,
+                    "Commission cannot be negative",
+                )
+
+            row.commission_override = commission
+
+    if "is_active" in payload:
+        if not isinstance(payload["is_active"], bool):
+            raise HTTPException(
+                400,
+                "is_active must be true or false",
+            )
+
+        row.is_active = payload["is_active"]
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="PRODUCT_OFFER_UPDATED",
+        entity_type="PRODUCT",
+        entity_id=product_id,
+        before=before,
+        after={
+            "offer_id": row.id,
+            "name": row.name,
+            "quantity": row.quantity,
+            "price": str(row.price),
+            "commission_override": (
+                str(row.commission_override)
+                if row.commission_override is not None
+                else None
+            ),
+            "is_active": row.is_active,
+        },
+    )
+
+    db.commit()
+    db.refresh(row)
+
+    return row
+
+
+@router.delete("/{product_id}/offers/{offer_id}")
+def delete_offer(
+    product_id: str,
+    offer_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OWNER", "ADMIN")),
+):
+    """
+    Delete an unused offer.
+
+    Historical orders keep their offer relationship,
+    so offers already used by an order cannot be deleted.
+    Disable them instead.
+    """
+
+    row = _offer_or_404(
+        db,
+        product_id,
+        offer_id,
+    )
+
+    used = (
+        db.query(Order)
+        .filter(Order.offer_id == row.id)
+        .first()
+    )
+
+    if used:
+        raise HTTPException(
+            409,
+            "This offer is already used by existing orders. Disable it instead.",
+        )
+
+    before = {
+        "offer_id": row.id,
+        "name": row.name,
+        "quantity": row.quantity,
+        "price": str(row.price),
+    }
+
+    db.delete(row)
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="PRODUCT_OFFER_DELETED",
+        entity_type="PRODUCT",
+        entity_id=product_id,
+        before=before,
+    )
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "deleted_id": offer_id,
+    }
+
