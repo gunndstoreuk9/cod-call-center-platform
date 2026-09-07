@@ -829,7 +829,29 @@ export default function WorkspacePage() {
 
                 <div className="tw-product-box">
                   <div className="tw-product-avatar">
-                    {order.product_name ? order.product_name.charAt(0).toUpperCase() : 'P'}
+                    {order.product_image_url ? (
+                      <img
+                        src={order.product_image_url}
+                        alt={order.product_name || 'Product'}
+                        loading="lazy"
+                        onError={e => {
+                          e.currentTarget.style.display = 'none'
+                          const fallback = e.currentTarget.nextElementSibling
+                          if (fallback) fallback.style.display = 'grid'
+                        }}
+                      />
+                    ) : null}
+
+                    <span
+                      className="tw-product-avatar-fallback"
+                      style={{
+                        display: order.product_image_url ? 'none' : 'grid'
+                      }}
+                    >
+                      {order.product_name
+                        ? order.product_name.charAt(0).toUpperCase()
+                        : 'P'}
+                    </span>
                   </div>
                   <div className="tw-product-main">
                     <span>{L('Product', 'المنتج')}</span>

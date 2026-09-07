@@ -61,6 +61,7 @@ def order_to_dict(db: Session, order: Order) -> dict:
         "customer_phone": customer.phone_e164 if customer else None,
         "product_name": product.name if product else None,
         "product_sku": product.sku if product else None,
+        "product_image_url": product.image_url if product else None,
         "offer_name": offer.name if offer else None,
         "offer_quantity": offer.quantity if offer else None,
         "offer_price": offer.price if offer else None,

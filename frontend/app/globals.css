@@ -2268,3 +2268,36 @@ html[dir="rtl"] .tw-agent .tw-list-head h2{
 
 /* CODOPS PRO DESIGN END */
 
+
+/* Agent Workspace — real product thumbnail */
+.tw-product-avatar{
+  width:52px;
+  height:52px;
+  flex:0 0 52px;
+  padding:0;
+  overflow:hidden;
+  border-radius:10px;
+  background:#f4f7fa;
+  border:1px solid #d9e2ec;
+  display:grid;
+  place-items:center;
+}
+
+.tw-product-avatar img{
+  width:100%;
+  height:100%;
+  display:block;
+  object-fit:cover;
+  object-position:center;
+}
+
+.tw-product-avatar-fallback{
+  width:100%;
+  height:100%;
+  place-items:center;
+  background:#0b2948;
+  color:#fff;
+  font-size:17px;
+  font-weight:700;
+}
+
