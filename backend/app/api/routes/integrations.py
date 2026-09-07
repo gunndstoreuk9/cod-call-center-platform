@@ -8,7 +8,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import current_user, require_roles
 from app.core.time import utcnow
-from app.models import DeliveryShipment, IntegrationConfig, IntegrationEvent, Order, Store, User
+from app.models import AgentProduct, DeliveryShipment, IntegrationConfig, IntegrationEvent, Order, Store, User
 from app.schemas import IntegrationCreate, IntegrationOut, IntegrationUpdate, SheetWebhookBatch
 from app.services.audit import log_action
 from app.services.digylog import DigylogError, apply_webhook, dispatch_order, test_connection
@@ -447,8 +447,25 @@ def dispatch_to_digylog(
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(404, "Order not found")
-    if user.role == "AGENT" and order.assigned_agent_id != user.id:
-        raise HTTPException(403, "This order is not assigned to you")
+    if user.role == "AGENT":
+        if order.assigned_agent_id != user.id:
+            raise HTTPException(403, "This order is not assigned to you")
+
+        allowed_product = (
+            db.query(AgentProduct)
+            .filter(
+                AgentProduct.agent_id == user.id,
+                AgentProduct.product_id == order.product_id,
+            )
+            .first()
+        )
+
+        if not allowed_product:
+            raise HTTPException(
+                403,
+                "You no longer have access to this product"
+            )
+
     if row.store_id and row.store_id != order.store_id:
         raise HTTPException(400, "This Digylog integration is linked to a different store")
     try:
@@ -512,3 +529,146 @@ def dispatch_to_default_digylog(
             user,
             exc,
         )
+
+
+@router.post("/digylog/{integration_id}/dispatch-bulk")
+def bulk_dispatch_to_digylog(
+    integration_id: str,
+    payload: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    """
+    Dispatch multiple confirmed orders to Digylog.
+
+    Designed for the Agent Workspace bulk action.
+    One failed order does not stop the remaining orders.
+    """
+
+    if user.role not in {"OWNER", "ADMIN", "SUPERVISOR", "AGENT"}:
+        raise HTTPException(403, "Insufficient permissions")
+
+    raw_ids = payload.get("order_ids") or []
+
+    if not isinstance(raw_ids, list):
+        raise HTTPException(400, "order_ids must be a list")
+
+    # Remove duplicates while keeping order.
+    order_ids = list(dict.fromkeys(
+        str(x).strip()
+        for x in raw_ids
+        if str(x).strip()
+    ))
+
+    if not order_ids:
+        raise HTTPException(400, "Select at least one order")
+
+    if len(order_ids) > 100:
+        raise HTTPException(
+            400,
+            "Maximum 100 orders per bulk dispatch"
+        )
+
+    # Validate integration once before processing the batch.
+    integration = _integration_or_404(
+        db,
+        integration_id,
+        "DIGYLOG"
+    )
+
+    if not integration.is_active:
+        raise HTTPException(
+            409,
+            "Digylog integration is disabled"
+        )
+
+    results = []
+    sent = 0
+    failed = 0
+
+    blocked_delivery_statuses = {
+        "DISPATCHED",
+        "IN_TRANSIT",
+        "OUT_FOR_DELIVERY",
+        "DELIVERED",
+    }
+
+    for order_id in order_ids:
+        try:
+            order = (
+                db.query(Order)
+                .filter(Order.id == order_id)
+                .first()
+            )
+
+            if not order:
+                raise HTTPException(
+                    404,
+                    "Order not found"
+                )
+
+            # Bulk dispatch is intentionally limited
+            # to confirmed orders.
+            if order.call_status != "CONFIRMED":
+                raise HTTPException(
+                    409,
+                    "Order is not confirmed"
+                )
+
+            # Prevent an already-sent order from being sent again.
+            if order.delivery_status in blocked_delivery_statuses:
+                raise HTTPException(
+                    409,
+                    f"Order already has delivery status {order.delivery_status}"
+                )
+
+            result = dispatch_to_digylog(
+                integration_id,
+                order_id,
+                db,
+                user,
+            )
+
+            sent += 1
+
+            results.append({
+                "order_id": order_id,
+                "order_number": order.order_number,
+                "ok": True,
+                "tracking_number": result.get("tracking_number"),
+                "delivery_status": result.get("delivery_status"),
+            })
+
+        except HTTPException as exc:
+            # Do not stop the whole batch because one order failed.
+            db.rollback()
+
+            failed += 1
+
+            results.append({
+                "order_id": order_id,
+                "ok": False,
+                "status_code": exc.status_code,
+                "error": str(exc.detail),
+            })
+
+        except Exception:
+            db.rollback()
+
+            failed += 1
+
+            results.append({
+                "order_id": order_id,
+                "ok": False,
+                "status_code": 500,
+                "error": "Unexpected dispatch error",
+            })
+
+    return {
+        "ok": failed == 0,
+        "requested": len(order_ids),
+        "sent": sent,
+        "failed": failed,
+        "results": results,
+    }
+
