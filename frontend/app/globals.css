@@ -977,3 +977,246 @@ html[dir="rtl"] .city-option {
   }
 }
 
+
+/* =========================================================
+   AGENT WORKSPACE V2 — READABILITY AR
+   ========================================================= */
+
+.awv2{
+  font-size:15px;
+}
+
+.awv2-hero{
+  padding:30px 32px;
+}
+
+.awv2-kicker{
+  font-size:12px;
+  font-weight:800;
+}
+
+.awv2-hero h1{
+  font-size:34px;
+  line-height:1.15;
+}
+
+.awv2-hero p{
+  font-size:15px;
+  line-height:1.7;
+}
+
+.awv2-manual{
+  min-height:48px;
+  padding-inline:18px;
+  font-size:14px;
+}
+
+.awv2-kpi{
+  min-height:118px;
+  padding:18px;
+}
+
+.awv2-kpi span{
+  font-size:12px;
+}
+
+.awv2-kpi strong{
+  font-size:34px;
+}
+
+.awv2-kpi small{
+  font-size:12px;
+}
+
+.awv2-toolbar{
+  padding:14px;
+}
+
+.awv2-search{
+  height:46px;
+}
+
+.awv2-search input{
+  font-size:14px !important;
+}
+
+.awv2-tab{
+  min-height:42px;
+  padding-inline:14px;
+  font-size:12px;
+}
+
+.awv2-tab b{
+  min-width:24px;
+  height:24px;
+  font-size:11px;
+}
+
+.awv2-list-head h2{
+  font-size:23px;
+}
+
+.awv2-list-head p{
+  font-size:13px;
+}
+
+.awv2-card{
+  padding:20px;
+}
+
+.awv2-card-order small{
+  font-size:11px;
+}
+
+.awv2-card-order strong{
+  font-size:13px;
+}
+
+.awv2-label{
+  font-size:11px;
+}
+
+.awv2-customer h3{
+  font-size:22px;
+}
+
+.awv2-phone{
+  font-size:18px;
+}
+
+.awv2-price span{
+  font-size:11px;
+}
+
+.awv2-price strong{
+  font-size:23px;
+}
+
+.awv2-info-grid span{
+  font-size:11px;
+}
+
+.awv2-info-grid strong{
+  font-size:14px;
+  line-height:1.5;
+}
+
+.awv2-product{
+  padding:14px;
+}
+
+.awv2-product-copy span,
+.awv2-product-meta span{
+  font-size:10px;
+}
+
+.awv2-product-copy strong{
+  font-size:15px;
+}
+
+.awv2-product-copy small{
+  font-size:11px;
+}
+
+.awv2-product-meta strong{
+  font-size:13px;
+}
+
+.awv2-note span{
+  font-size:10px;
+}
+
+.awv2-note p{
+  font-size:13px;
+  line-height:1.6;
+}
+
+.awv2-meta-line{
+  font-size:11px;
+}
+
+.awv2-action{
+  min-height:48px;
+  font-size:13px;
+}
+
+.awv2-action strong{
+  font-size:15px;
+}
+
+.awv2-secondary-actions button{
+  min-height:34px;
+  padding-inline:11px;
+  font-size:11px;
+}
+
+.awv2-send{
+  min-height:44px;
+  font-size:13px;
+}
+
+.awv2-empty h3{
+  font-size:22px;
+}
+
+.awv2-empty p{
+  font-size:14px;
+}
+
+.awv2-bulk-bar span,
+.awv2-bulk-bar small{
+  font-size:11px;
+}
+
+/* Better Arabic / RTL */
+html[dir="rtl"] .awv2{
+  direction:rtl;
+  text-align:right;
+}
+
+html[dir="rtl"] .awv2-search input{
+  direction:rtl;
+  text-align:right;
+}
+
+html[dir="rtl"] .awv2-card{
+  text-align:right;
+}
+
+html[dir="rtl"] .awv2-price{
+  text-align:left;
+}
+
+html[dir="rtl"] .awv2-product-meta{
+  text-align:left;
+}
+
+html[dir="rtl"] .awv2-card-order strong,
+html[dir="rtl"] .awv2-phone,
+html[dir="rtl"] .awv2-meta-line .track{
+  unicode-bidi:plaintext;
+}
+
+@media(max-width:720px){
+  .awv2{
+    font-size:14px;
+  }
+
+  .awv2-hero h1{
+    font-size:28px;
+  }
+
+  .awv2-customer h3{
+    font-size:20px;
+  }
+
+  .awv2-phone{
+    font-size:17px;
+  }
+
+  .awv2-price strong{
+    font-size:21px;
+  }
+}
+
+

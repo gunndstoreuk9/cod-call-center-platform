@@ -509,7 +509,7 @@ export default function WorkspacePage() {
     ['FOLLOW_UP', t('Follow-up'), counts.followUp],
     ['CONFIRMED', t('Confirmed'), counts.confirmed],
     ['READY', t('Ready to Send'), counts.ready],
-    ['BLACKLIST', 'Blacklist', counts.blacklist],
+    ['BLACKLIST', t('Blacklist'), counts.blacklist],
     ['ALL', t('All'), counts.all]
   ]
 
@@ -530,7 +530,7 @@ export default function WorkspacePage() {
         <section className="awv2-hero">
           <div>
             <span className="awv2-kicker">
-              COD OPS · AGENT DESK
+              {t('COD OPS · AGENT DESK')}
             </span>
 
             <h1>{t('Call Workspace')}</h1>
@@ -880,7 +880,7 @@ export default function WorkspacePage() {
 
                   <div className="awv2-meta-line">
                     <span>
-                      {order.source || '—'}
+                      {order.source === 'MANUAL' ? t('Manual') : (order.source || '—')}
                     </span>
 
                     <span>
