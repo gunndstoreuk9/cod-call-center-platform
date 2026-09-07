@@ -4,432 +4,380 @@ import { useEffect, useMemo, useState } from 'react'
 import { api, money } from '../../../lib/api'
 import { useI18n } from '../../../lib/i18n'
 import Modal from '../../../components/Modal'
-import StatusBadge from '../../../components/StatusBadge'
 import CitySelect from '../../../components/CitySelect'
 
-const emptyManual = {
+const EMPTY_BOARD = {
+  counts: {
+    new: 0,
+    follow_up: 0,
+    ready: 0,
+    blacklist: 0,
+    closed: 0,
+    sent: 0,
+    all: 0
+  },
+  products: [],
+  orders: []
+}
+
+const EMPTY_MANUAL = {
   product_id: '',
   offer_id: '',
   customer_name: '',
   phone: '',
   city: '',
   address: '',
-  quantity: 1,
   call_note: ''
 }
 
-const blockedDelivery = [
+const LOCKED_DELIVERY = new Set([
   'DISPATCHED',
   'IN_TRANSIT',
   'OUT_FOR_DELIVERY',
   'DELIVERED'
-]
+])
+
+
+const draftFromOrder = order => ({
+  customer_name: order.customer_name || '',
+  phone: order.customer_phone || '',
+  city: order.city || '',
+  address: order.address || '',
+  offer_id: order.offer_id || '',
+  call_note: order.call_note || ''
+})
+
+const phoneForWhatsApp = value => String(value || '').replace(/\D/g, '')
 
 export default function WorkspacePage() {
-  const { t, status: statusText, date } = useI18n()
+  const { locale, date } = useI18n()
+  const isAr = locale === 'ar'
+  const L = (en, ar) => (isAr ? ar : en)
 
   const [bucket, setBucket] = useState('NEW')
-  const [orders, setOrders] = useState([])
-  const [allOrders, setAllOrders] = useState([])
+  const [productId, setProductId] = useState('')
+  const [board, setBoard] = useState(EMPTY_BOARD)
+  const [drafts, setDrafts] = useState({})
   const [search, setSearch] = useState('')
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [savingId, setSavingId] = useState(null)
+  const [dispatchingId, setDispatchingId] = useState(null)
 
   const [selectedIds, setSelectedIds] = useState([])
   const [bulkBusy, setBulkBusy] = useState(false)
   const [bulkResult, setBulkResult] = useState(null)
-  const [dispatchingId, setDispatchingId] = useState(null)
-
-  const [selected, setSelected] = useState(null)
-
-  const [cbOpen, setCbOpen] = useState(false)
-  const [cbTime, setCbTime] = useState('')
-  const [cbNote, setCbNote] = useState('')
 
   const [manualOpen, setManualOpen] = useState(false)
-  const [products, setProducts] = useState([])
-  const [manual, setManual] = useState(emptyManual)
+  const [manualProducts, setManualProducts] = useState([])
+  const [manual, setManual] = useState(EMPTY_MANUAL)
   const [savingManual, setSavingManual] = useState(false)
 
-  const [editOpen, setEditOpen] = useState(false)
-  const [savingEdit, setSavingEdit] = useState(false)
-  const [editForm, setEditForm] = useState({
-    customer_name: '',
-    phone: '',
-    city: '',
-    address: '',
-    quantity: 1,
-    unit_price: '',
-    total_price: '',
-    call_note: ''
-  })
+  const [callbackOpen, setCallbackOpen] = useState(false)
+  const [callbackOrder, setCallbackOrder] = useState(null)
+  const [callbackAt, setCallbackAt] = useState('')
+  const [callbackNote, setCallbackNote] = useState('')
+  const [callbackBusy, setCallbackBusy] = useState(false)
 
-  const isReady = o =>
-    o?.call_status === 'CONFIRMED' &&
-    !blockedDelivery.includes(o?.delivery_status)
+  const statusLabel = value => {
+    const map = {
+      NEW: L('New', 'جديد'),
+      NO_ANSWER: L('No answer', 'لا يجيب'),
+      VOICEMAIL: L('Voicemail', 'صندوق صوتي'),
+      BUSY: L('Busy', 'مشغول'),
+      CALLBACK: L('Follow-up', 'متابعة'),
+      CONFIRMED: L('Confirmed', 'مؤكد'),
+      BLACKLIST: L('Blacklist', 'القائمة السوداء'),
+      CANCELLED: L('Cancelled', 'ملغى'),
+      WRONG_NUMBER: L('Wrong number', 'رقم خاطئ'),
+      DUPLICATE: L('Duplicate', 'طلب مكرر'),
+      NOT_INTERESTED: L('Not interested', 'غير مهتم'),
+      NOT_READY: L('Not ready', 'غير جاهز'),
+      READY: L('Ready to send', 'جاهز للإرسال'),
+      DISPATCHED: L('Sent', 'تم الإرسال'),
+      IN_TRANSIT: L('In transit', 'في الطريق'),
+      OUT_FOR_DELIVERY: L('Out for delivery', 'خارج للتسليم'),
+      DELIVERED: L('Delivered', 'تم التسليم'),
+      REFUSED: L('Refused', 'مرفوض'),
+      RETURNED: L('Returned', 'مرتجع'),
+      ISSUE: L('Delivery issue', 'مشكلة توصيل')
+    }
+    return map[value] || String(value || '—').replaceAll('_', ' ')
+  }
 
-  const isSent = o =>
-    blockedDelivery.includes(o?.delivery_status)
-
-  const fetchData = async activeBucket => {
+  const loadBoard = async (nextBucket = bucket, nextProductId = productId) => {
+    setLoading(true)
     setError('')
 
     try {
-      const apiBucket = activeBucket === 'READY' ? 'ALL' : activeBucket
+      const params = new URLSearchParams({
+        bucket: nextBucket,
+        limit: '200'
+      })
 
-      const [rows, summary] = await Promise.all([
-        api(`/orders/my-queue?bucket=${apiBucket}&limit=200`),
-        api('/orders/my-queue?bucket=ALL&limit=200')
-      ])
+      if (nextProductId) params.set('product_id', nextProductId)
 
-      const visible =
-        activeBucket === 'READY'
-          ? rows.filter(isReady)
-          : rows
+      const data = await api(`/orders/agent-board?${params.toString()}`)
+      const safe = {
+        counts: data.counts || EMPTY_BOARD.counts,
+        products: data.products || [],
+        orders: data.orders || []
+      }
 
-      setOrders(visible)
-      setAllOrders(summary)
+      setBoard(safe)
+
+      const nextDrafts = {}
+      for (const order of safe.orders) nextDrafts[order.id] = draftFromOrder(order)
+      setDrafts(nextDrafts)
 
       setSelectedIds(current =>
         current.filter(id =>
-          visible.some(o => o.id === id && isReady(o))
+          safe.orders.some(
+            order =>
+              order.id === id &&
+              order.call_status === 'CONFIRMED' &&
+              order.delivery_status === 'READY'
+          )
         )
       )
     } catch (e) {
       setError(e.message)
+    } finally {
+      setLoading(false)
     }
   }
 
   useEffect(() => {
-    fetchData(bucket)
-  }, [bucket])
+    loadBoard(bucket, productId)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bucket, productId])
 
-  const refresh = async () => {
-    await fetchData(bucket)
+  const setDraftField = (orderId, key, value) => {
+    setDrafts(current => ({
+      ...current,
+      [orderId]: {
+        ...(current[orderId] || {}),
+        [key]: value
+      }
+    }))
   }
-
-  const counts = useMemo(() => {
-    const followUp = allOrders.filter(o =>
-      ['NO_ANSWER', 'BUSY', 'CALLBACK'].includes(o.call_status)
-    ).length
-
-    return {
-      all: allOrders.length,
-      new: allOrders.filter(o => o.call_status === 'NEW').length,
-      followUp,
-      confirmed: allOrders.filter(o => o.call_status === 'CONFIRMED').length,
-      ready: allOrders.filter(isReady).length,
-      sent: allOrders.filter(isSent).length,
-      blacklist: allOrders.filter(o => o.call_status === 'BLACKLIST').length
-    }
-  }, [allOrders])
 
   const filteredOrders = useMemo(() => {
     const q = search.trim().toLowerCase()
+    if (!q) return board.orders
 
-    if (!q) return orders
-
-    return orders.filter(o =>
+    return board.orders.filter(order =>
       [
-        o.customer_name,
-        o.customer_phone,
-        o.order_number,
-        o.city,
-        o.address,
-        o.product_name,
-        o.product_sku,
-        o.offer_name,
-        o.store_name,
-        o.source
+        order.order_number,
+        order.customer_name,
+        order.customer_phone,
+        order.product_name,
+        order.product_sku,
+        order.offer_name,
+        order.city,
+        order.address,
+        order.store_name,
+        order.source,
+        order.delivery_tracking
       ]
         .filter(Boolean)
         .join(' ')
         .toLowerCase()
         .includes(q)
     )
-  }, [orders, search])
+  }, [board.orders, search])
 
-  const readyVisible = useMemo(
-    () => filteredOrders.filter(isReady),
-    [filteredOrders]
-  )
+  const currentBucketCount = useMemo(() => {
+    const c = board.counts || EMPTY_BOARD.counts
+    const map = {
+      NEW: c.new,
+      FOLLOW_UP: c.follow_up,
+      READY: c.ready,
+      BLACKLIST: c.blacklist,
+      CLOSED: c.closed,
+      SENT: c.sent,
+      ALL: c.all
+    }
+    return map[bucket] ?? 0
+  }, [board.counts, bucket])
 
-  const selectedProduct = useMemo(
-    () => products.find(p => p.id === manual.product_id),
-    [products, manual.product_id]
-  )
+  const tabs = [
+    ['NEW', L('New orders', 'طلبات جديدة'), board.counts.new],
+    ['FOLLOW_UP', L('Follow-up', 'للمتابعة'), board.counts.follow_up],
+    ['READY', L('Ready to send', 'للإرسال'), board.counts.ready],
+    ['BLACKLIST', L('Blacklist', 'القائمة السوداء'), board.counts.blacklist],
+    ['CLOSED', L('Draft / Closed', 'مسودة / مغلقة'), board.counts.closed],
+    ['SENT', L('Sent', 'تم الإرسال'), board.counts.sent],
+    ['ALL', L('All', 'الكل'), board.counts.all]
+  ]
 
-  const selectedOffer = useMemo(
-    () => selectedProduct?.offers?.find(o => o.id === manual.offer_id),
-    [selectedProduct, manual.offer_id]
-  )
+  const kpis = [
+    [L('New', 'جديدة'), board.counts.new, 'new'],
+    [L('Follow-up', 'متابعة'), board.counts.follow_up, 'follow'],
+    [L('Ready', 'للإرسال'), board.counts.ready, 'ready'],
+    [L('Blacklist', 'سوداء'), board.counts.blacklist, 'blacklist'],
+    [L('Closed', 'مغلقة'), board.counts.closed, 'closed'],
+    [L('Sent', 'مرسلة'), board.counts.sent, 'sent']
+  ]
 
-  const previewTotal = selectedOffer
-    ? selectedOffer.price
-    : selectedProduct
-      ? Number(selectedProduct.selling_price || 0) *
-        Number(manual.quantity || 1)
-      : 0
+  const buildWorkflowBody = (order, outcome = null) => {
+    const draft = drafts[order.id] || draftFromOrder(order)
+    const body = {
+      customer_name: String(draft.customer_name || '').trim(),
+      phone: String(draft.phone || '').trim(),
+      city: draft.city || '',
+      address: String(draft.address || '').trim(),
+      call_note: String(draft.call_note || '').trim()
+    }
 
-  const loadManualMeta = async () => {
-    setError('')
+    if ((draft.offer_id || '') !== (order.offer_id || '')) {
+      body.offer_id = draft.offer_id || ''
+    }
 
-    try {
-      const data = await api('/orders/manual-meta')
-      const list = data.products || []
+    if (outcome) body.outcome = outcome
+    return body
+  }
 
-      setProducts(list)
+  const validateConfirmation = order => {
+    const draft = drafts[order.id] || draftFromOrder(order)
 
-      if (list.length) {
-        setManual({
-          ...emptyManual,
-          product_id: list[0].id,
-          quantity: list[0].default_qty || 1
-        })
+    if (!String(draft.customer_name || '').trim()) {
+      return L('Customer name is required.', 'اسم العميل مطلوب.')
+    }
+    if (!String(draft.phone || '').trim()) {
+      return L('Phone number is required.', 'رقم الهاتف مطلوب.')
+    }
+    if (!draft.offer_id) {
+      return L('Select an active product offer.', 'اختر عرضاً نشطاً للمنتج.')
+    }
+    if (!draft.city) {
+      return L('Select a Digylog city.', 'اختر مدينة صحيحة من Digylog.')
+    }
+    if (!String(draft.address || '').trim()) {
+      return L('Customer address is required.', 'عنوان العميل مطلوب.')
+    }
+    return ''
+  }
+
+  const saveOrder = async (order, outcome = null) => {
+    if (!order?.editable) return
+
+    if (outcome === 'CONFIRMED') {
+      const validation = validateConfirmation(order)
+      if (validation) {
+        setError(validation)
+        return
       }
-
-      setManualOpen(true)
-    } catch (e) {
-      setError(e.message)
     }
-  }
 
-  const changeManualProduct = id => {
-    const p = products.find(x => x.id === id)
-
-    setManual({
-      ...manual,
-      product_id: id,
-      offer_id: '',
-      quantity: p?.default_qty || 1
-    })
-  }
-
-  const changeOffer = id => {
-    const offer = selectedProduct?.offers?.find(x => x.id === id)
-
-    setManual({
-      ...manual,
-      offer_id: id,
-      quantity:
-        offer?.quantity ||
-        selectedProduct?.default_qty ||
-        1
-    })
-  }
-
-  const createManualOrder = async e => {
-    e.preventDefault()
-
-    if (!selectedProduct) return
-
-    setSavingManual(true)
+    setSavingId(order.id)
     setError('')
+    setNotice('')
 
     try {
-      await api('/orders/manual', {
+      await api(`/orders/agent-workflow/${order.id}`, {
         method: 'POST',
-        body: {
-          store_id: selectedProduct.store_id,
-          product_id: selectedProduct.id,
-          offer_id: manual.offer_id || null,
-          customer_name: manual.customer_name,
-          phone: manual.phone,
-          city: manual.city,
-          address: manual.address,
-          quantity: Number(manual.quantity || 1),
-          unit_price: null,
-          total_price: null,
-          assigned_agent_id: null,
-          source: 'MANUAL',
-          call_status: 'NEW',
-          call_note: manual.call_note
-        }
-      })
-
-      setManualOpen(false)
-      setManual(emptyManual)
-      setNotice(t('Order created successfully.'))
-      setBucket('NEW')
-      await fetchData('NEW')
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setSavingManual(false)
-    }
-  }
-
-  const canEditOrder = order =>
-    order &&
-    !order.delivery_tracking &&
-    !blockedDelivery.includes(order.delivery_status)
-
-  const openEditOrder = order => {
-    setSelected(order)
-
-    setEditForm({
-      customer_name: order.customer_name || '',
-      phone: order.customer_phone || '',
-      city: order.city || '',
-      address: order.address || '',
-      quantity: Number(order.quantity || 1),
-      unit_price: order.unit_price ?? '',
-      total_price: order.total_price ?? '',
-      call_note: order.call_note || ''
-    })
-
-    setEditOpen(true)
-  }
-
-  const changeEditQuantity = value => {
-    setEditForm(f => ({
-      ...f,
-      quantity: value,
-      total_price:
-        value !== '' && f.unit_price !== ''
-          ? (Number(value) * Number(f.unit_price)).toFixed(2)
-          : f.total_price
-    }))
-  }
-
-  const changeEditUnitPrice = value => {
-    setEditForm(f => ({
-      ...f,
-      unit_price: value,
-      total_price:
-        value !== '' && f.quantity !== ''
-          ? (Number(value) * Number(f.quantity)).toFixed(2)
-          : f.total_price
-    }))
-  }
-
-  const saveEditOrder = async e => {
-    e.preventDefault()
-
-    if (!selected) return
-
-    if (!editForm.city) {
-      setError(t('Select a Digylog city.'))
-      return
-    }
-
-    setSavingEdit(true)
-    setError('')
-
-    try {
-      await api(`/orders/${selected.id}`, {
-        method: 'PATCH',
-        body: {
-          customer_name: editForm.customer_name.trim(),
-          phone: editForm.phone.trim(),
-          city: editForm.city,
-          address: editForm.address,
-          quantity: Number(editForm.quantity),
-          unit_price: Number(editForm.unit_price),
-          total_price: Number(editForm.total_price),
-          call_note: editForm.call_note
-        }
-      })
-
-      setEditOpen(false)
-      setNotice(t('Order updated successfully.'))
-      await refresh()
-    } catch (e) {
-      setError(e.message)
-    } finally {
-      setSavingEdit(false)
-    }
-  }
-
-  const outcome = async (order, status) => {
-    if (!order) return
-
-    setError('')
-
-    try {
-      await api(`/orders/${order.id}/call-attempts`, {
-        method: 'POST',
-        body: {
-          outcome: status,
-          channel: 'PHONE'
-        }
+        body: buildWorkflowBody(order, outcome)
       })
 
       setNotice(
-        `${order.customer_name} → ${statusText(status)}`
+        outcome
+          ? `${order.customer_name || order.order_number} → ${statusLabel(outcome)}`
+          : L('Changes saved successfully.', 'تم حفظ التعديلات بنجاح.')
       )
 
-      await refresh()
+      await loadBoard(bucket, productId)
     } catch (e) {
       setError(e.message)
+    } finally {
+      setSavingId(null)
     }
   }
 
   const openCallback = order => {
-    setSelected(order)
-    setCbTime('')
-    setCbNote(order.call_note || '')
-    setCbOpen(true)
+    setCallbackOrder(order)
+    setCallbackAt('')
+    setCallbackNote((drafts[order.id]?.call_note || order.call_note || '').trim())
+    setCallbackOpen(true)
   }
 
-  const callback = async e => {
+  const saveCallback = async e => {
     e.preventDefault()
+    if (!callbackOrder || !callbackAt) return
 
-    if (!selected) return
-
+    setCallbackBusy(true)
     setError('')
 
     try {
-      await api(`/orders/${selected.id}/callbacks`, {
+      const draft = drafts[callbackOrder.id] || draftFromOrder(callbackOrder)
+      setDrafts(current => ({
+        ...current,
+        [callbackOrder.id]: {
+          ...draft,
+          call_note: callbackNote
+        }
+      }))
+
+      const body = buildWorkflowBody(callbackOrder, 'CALLBACK')
+      body.call_note = callbackNote
+
+      await api(`/orders/agent-workflow/${callbackOrder.id}`, {
+        method: 'POST',
+        body
+      })
+
+      await api(`/orders/${callbackOrder.id}/callbacks`, {
         method: 'POST',
         body: {
-          scheduled_at: new Date(cbTime).toISOString(),
+          scheduled_at: new Date(callbackAt).toISOString(),
           reason: 'Customer callback',
-          note: cbNote
+          note: callbackNote
         }
       })
 
-      setCbOpen(false)
-      setCbTime('')
-      setCbNote('')
-      setNotice(t('Callback scheduled.'))
-
-      await refresh()
+      setCallbackOpen(false)
+      setCallbackOrder(null)
+      setCallbackAt('')
+      setCallbackNote('')
+      setNotice(L('Follow-up scheduled.', 'تمت جدولة المتابعة.'))
+      await loadBoard(bucket, productId)
     } catch (e) {
       setError(e.message)
+    } finally {
+      setCallbackBusy(false)
     }
   }
 
   const dispatchDigylog = async order => {
     setDispatchingId(order.id)
     setError('')
+    setNotice('')
 
     try {
-      const r = await api(
-        `/integrations/digylog/dispatch/${order.id}`,
-        { method: 'POST' }
-      )
+      const result = await api(`/integrations/digylog/dispatch/${order.id}`, {
+        method: 'POST'
+      })
 
       setNotice(
-        `${t('Sent to Digylog. Tracking:')} ${
-          r.tracking_number || 'created'
+        `${L('Sent to Digylog', 'تم الإرسال إلى Digylog')}${
+          result.tracking_number ? ` · ${result.tracking_number}` : ''
         }`
       )
-
-      await refresh()
+      await loadBoard(bucket, productId)
     } catch (e) {
       try {
-        const blacklisted = await api(
-          '/orders/my-queue?bucket=BLACKLIST&limit=200'
-        )
-
-        if (blacklisted.some(x => x.id === order.id)) {
+        const black = await api('/orders/agent-board?bucket=BLACKLIST&limit=200')
+        const moved = (black.orders || []).some(item => item.id === order.id)
+        if (moved) {
+          setBucket('BLACKLIST')
+          setProductId('')
           setError(
-            t(
-              'Digylog rejected this phone number because it is blacklisted. Edit the phone or customer information, then retry.'
+            L(
+              'Digylog rejected this order as blacklisted. Correct the customer information and retry.',
+              'رفض Digylog هذا الطلب بسبب القائمة السوداء. صحح بيانات العميل ثم أعد الإرسال.'
             )
           )
-          setBucket('BLACKLIST')
         } else {
           setError(e.message)
         }
@@ -441,62 +389,52 @@ export default function WorkspacePage() {
     }
   }
 
+  const readyVisible = useMemo(
+    () =>
+      filteredOrders.filter(
+        order => order.call_status === 'CONFIRMED' && order.delivery_status === 'READY'
+      ),
+    [filteredOrders]
+  )
+
   const toggleSelected = id => {
     setSelectedIds(current =>
-      current.includes(id)
-        ? current.filter(x => x !== id)
-        : [...current, id]
+      current.includes(id) ? current.filter(x => x !== id) : [...current, id]
     )
   }
 
   const selectAllReady = () => {
-    const ids = readyVisible.map(o => o.id)
+    const ids = readyVisible.map(order => order.id)
+    const allSelected = ids.length > 0 && ids.every(id => selectedIds.includes(id))
 
-    const allAlready = ids.every(id =>
-      selectedIds.includes(id)
+    setSelectedIds(current =>
+      allSelected
+        ? current.filter(id => !ids.includes(id))
+        : Array.from(new Set([...current, ...ids]))
     )
-
-    if (allAlready) {
-      setSelectedIds(current =>
-        current.filter(id => !ids.includes(id))
-      )
-    } else {
-      setSelectedIds(current =>
-        Array.from(new Set([...current, ...ids]))
-      )
-    }
   }
 
   const bulkDispatch = async () => {
     if (!selectedIds.length) return
 
     setBulkBusy(true)
-    setBulkResult(null)
     setError('')
+    setBulkResult(null)
 
     try {
-      const result = await api(
-        '/integrations/digylog/dispatch-bulk',
-        {
-          method: 'POST',
-          body: {
-            order_ids: selectedIds
-          }
-        }
-      )
-
-      const failures = (result.results || [])
-        .filter(x => !x.ok)
-        .slice(0, 5)
+      const result = await api('/integrations/digylog/dispatch-bulk', {
+        method: 'POST',
+        body: { order_ids: selectedIds }
+      })
 
       setBulkResult({
         sent: result.sent || 0,
         failed: result.failed || 0,
-        failures
+        failures: (result.results || []).filter(x => !x.ok).slice(0, 5)
       })
 
       setSelectedIds([])
-      await refresh()
+      await loadBoard(bucket, productId)
     } catch (e) {
       setError(e.message)
     } finally {
@@ -504,756 +442,806 @@ export default function WorkspacePage() {
     }
   }
 
-  const tabItems = [
-    ['NEW', t('New'), counts.new],
-    ['FOLLOW_UP', t('Follow-up'), counts.followUp],
-    ['CONFIRMED', t('Confirmed'), counts.confirmed],
-    ['READY', t('Ready to Send'), counts.ready],
-    ['BLACKLIST', t('Blacklist'), counts.blacklist],
-    ['ALL', t('All'), counts.all]
-  ]
-
-  const formatCreated = value => {
-    if (!value) return '—'
+  const loadManualMeta = async () => {
+    setError('')
 
     try {
-      return date ? date(value) : new Date(value).toLocaleString()
+      const data = await api('/orders/manual-meta')
+      const list = data.products || []
+      setManualProducts(list)
+
+      if (list.length) {
+        const first = list[0]
+        const firstOffer = first.offers?.[0]
+        setManual({
+          ...EMPTY_MANUAL,
+          product_id: first.id,
+          offer_id: firstOffer?.id || ''
+        })
+      } else {
+        setManual(EMPTY_MANUAL)
+      }
+
+      setManualOpen(true)
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  const manualProduct = useMemo(
+    () => manualProducts.find(product => product.id === manual.product_id),
+    [manualProducts, manual.product_id]
+  )
+
+  const manualOffer = useMemo(
+    () => manualProduct?.offers?.find(offer => offer.id === manual.offer_id),
+    [manualProduct, manual.offer_id]
+  )
+
+  const changeManualProduct = id => {
+    const product = manualProducts.find(item => item.id === id)
+    setManual(current => ({
+      ...current,
+      product_id: id,
+      offer_id: product?.offers?.[0]?.id || ''
+    }))
+  }
+
+  const createManualOrder = async e => {
+    e.preventDefault()
+
+    if (!manualProduct) return
+    if (!manualOffer) {
+      setError(L('This product needs an active offer.', 'هذا المنتج يحتاج إلى عرض نشط.'))
+      return
+    }
+    if (!manual.city) {
+      setError(L('Select a Digylog city.', 'اختر مدينة صحيحة من Digylog.'))
+      return
+    }
+
+    setSavingManual(true)
+    setError('')
+
+    try {
+      await api('/orders/manual', {
+        method: 'POST',
+        body: {
+          store_id: manualProduct.store_id,
+          product_id: manualProduct.id,
+          offer_id: manualOffer.id,
+          customer_name: manual.customer_name.trim(),
+          phone: manual.phone.trim(),
+          city: manual.city,
+          address: manual.address.trim(),
+          quantity: Number(manualOffer.quantity || 1),
+          unit_price: null,
+          total_price: null,
+          assigned_agent_id: null,
+          source: 'MANUAL',
+          call_status: 'NEW',
+          call_note: manual.call_note.trim()
+        }
+      })
+
+      setManualOpen(false)
+      setManual(EMPTY_MANUAL)
+      setBucket('NEW')
+      setProductId('')
+      setNotice(L('Order created successfully.', 'تم إنشاء الطلب بنجاح.'))
+      await loadBoard('NEW', '')
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSavingManual(false)
+    }
+  }
+
+  const formatDate = value => {
+    if (!value) return '—'
+    try {
+      return date(value)
     } catch {
       return '—'
     }
   }
 
+  const orderIsDirty = order => {
+    const draft = drafts[order.id]
+    if (!draft) return false
+
+    return (
+      String(draft.customer_name || '').trim() !== String(order.customer_name || '').trim() ||
+      String(draft.phone || '').trim() !== String(order.customer_phone || '').trim() ||
+      (draft.city || '') !== (order.city || '') ||
+      String(draft.address || '').trim() !== String(order.address || '').trim() ||
+      (draft.offer_id || '') !== (order.offer_id || '') ||
+      String(draft.call_note || '').trim() !== String(order.call_note || '').trim()
+    )
+  }
+
+  const statusClass = value => {
+    if (value === 'CONFIRMED' || value === 'READY' || value === 'DELIVERED') return 'ok'
+    if (value === 'BLACKLIST' || value === 'CANCELLED' || value === 'WRONG_NUMBER') return 'bad'
+    if (value === 'NO_ANSWER' || value === 'VOICEMAIL' || value === 'BUSY' || value === 'CALLBACK') return 'warn'
+    if (LOCKED_DELIVERY.has(value)) return 'sent'
+    return 'neutral'
+  }
+
   return (
-    <>
-      <div className="awv2">
-
-        <section className="awv2-hero">
-          <div>
-            <span className="awv2-kicker">
-              {t('COD OPS · AGENT DESK')}
-            </span>
-
-            <h1>{t('Call Workspace')}</h1>
-
-            <p>
-              {t(
-                'Call customers, confirm orders and move ready orders to delivery.'
-              )}
-            </p>
+    <div className="tw-agent" dir={isAr ? 'rtl' : 'ltr'}>
+      <section className="tw-head">
+        <div>
+          <span className="tw-kicker">COD OPS · CALL CENTER</span>
+          <h1>{L('Order confirmation workspace', 'مساحة تأكيد الطلبات')}</h1>
+          <p>
+            {L(
+              'Edit customer information, select product offers, record call outcomes and send confirmed orders to delivery.',
+              'عدّل بيانات العميل، اختر العرض، سجّل نتيجة المكالمة وأرسل الطلبات المؤكدة إلى التوصيل.'
+            )}
+          </p>
+        </div>
+        <div className="tw-head-actions">
+          <div className="tw-assigned-total">
+            <span>{L('Assigned orders', 'الطلبات المسندة')}</span>
+            <strong>{board.counts.all}</strong>
           </div>
-
-          <button
-            className="btn awv2-manual"
-            onClick={loadManualMeta}
-          >
-            + {t('Manual Order')}
+          <button type="button" className="tw-primary-btn" onClick={loadManualMeta}>
+            + {L('New order', 'طلب جديد')}
           </button>
-        </section>
+        </div>
+      </section>
 
-        <section className="awv2-kpis">
-          <div className="awv2-kpi">
-            <span>{t('Assigned')}</span>
-            <strong>{counts.all}</strong>
-            <small>{t('My orders')}</small>
+      <section className="tw-kpis">
+        {kpis.map(([label, count, tone]) => (
+          <div className={`tw-kpi ${tone}`} key={tone}>
+            <span>{label}</span>
+            <strong>{count}</strong>
           </div>
+        ))}
+      </section>
 
-          <div className="awv2-kpi">
-            <span>{t('New')}</span>
-            <strong>{counts.new}</strong>
-            <small>{t('Waiting')}</small>
-          </div>
+      {error && <div className="tw-alert error">{error}</div>}
 
-          <div className="awv2-kpi">
-            <span>{t('Follow-up')}</span>
-            <strong>{counts.followUp}</strong>
-            <small>{t('Need another call')}</small>
-          </div>
+      {notice && (
+        <div className="tw-alert success">
+          <span>✓ {notice}</span>
+          <button type="button" onClick={() => setNotice('')}>×</button>
+        </div>
+      )}
 
-          <div className="awv2-kpi success">
-            <span>{t('Confirmed')}</span>
-            <strong>{counts.confirmed}</strong>
-            <small>{t('Accepted')}</small>
-          </div>
-
-          <div className="awv2-kpi ready">
-            <span>{t('Ready to Send')}</span>
-            <strong>{counts.ready}</strong>
-            <small>Digylog</small>
-          </div>
-
-          <div className="awv2-kpi sent">
-            <span>{t('Sent')}</span>
-            <strong>{counts.sent}</strong>
-            <small>{t('Delivery')}</small>
-          </div>
-        </section>
-
-        {error && (
-          <div className="error awv2-message">
-            {error}
-          </div>
-        )}
-
-        {notice && (
-          <div className="awv2-notice">
-            <strong>✓</strong>
-            <span>{notice}</span>
-            <button onClick={() => setNotice('')}>×</button>
-          </div>
-        )}
-
-        {bulkResult && (
-          <div
-            className={
-              bulkResult.failed
-                ? 'awv2-bulk-result partial'
-                : 'awv2-bulk-result'
-            }
-          >
-            <div>
-              <strong>
-                {bulkResult.sent} {t('sent')}
-              </strong>
-
-              <span>
-                {bulkResult.failed} {t('failed')}
-              </span>
-            </div>
-
+      {bulkResult && (
+        <div className={`tw-alert ${bulkResult.failed ? 'warning' : 'success'}`}>
+          <div>
+            <strong>{bulkResult.sent} {L('sent', 'تم إرسالها')}</strong>
+            {' · '}
+            <span>{bulkResult.failed} {L('failed', 'فشلت')}</span>
             {bulkResult.failures.length > 0 && (
               <small>
-                {bulkResult.failures
-                  .map(x => x.error)
-                  .join(' · ')}
+                {' — '}
+                {bulkResult.failures.map(item => item.error).join(' · ')}
               </small>
             )}
-
-            <button onClick={() => setBulkResult(null)}>
-              ×
-            </button>
           </div>
-        )}
+          <button type="button" onClick={() => setBulkResult(null)}>×</button>
+        </div>
+      )}
 
-        <section className="awv2-toolbar">
-          <div className="awv2-search">
+      <section className="tw-control-panel">
+        <div className="tw-tabs">
+          {tabs.map(([key, label, count]) => (
+            <button
+              type="button"
+              key={key}
+              className={bucket === key ? 'tw-tab active' : 'tw-tab'}
+              onClick={() => {
+                setBucket(key)
+                setProductId('')
+                setSelectedIds([])
+                setSearch('')
+              }}
+            >
+              <span>{label}</span>
+              <b>{count}</b>
+            </button>
+          ))}
+        </div>
+
+        <div className="tw-toolbar">
+          <div className="tw-search">
             <span>⌕</span>
-
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder={t(
-                'Search customer, phone, city, order, product...'
+              placeholder={L(
+                'Search name, phone, city, order or product...',
+                'ابحث بالاسم أو الهاتف أو المدينة أو رقم الطلب أو المنتج...'
               )}
             />
-
             {search && (
-              <button onClick={() => setSearch('')}>
-                ×
-              </button>
+              <button type="button" onClick={() => setSearch('')}>×</button>
             )}
-          </div>
-
-          <div className="awv2-tabs">
-            {tabItems.map(([key, label, count]) => (
-              <button
-                key={key}
-                className={
-                  bucket === key
-                    ? 'awv2-tab active'
-                    : 'awv2-tab'
-                }
-                onClick={() => {
-                  setBucket(key)
-                  setSearch('')
-                  setSelectedIds([])
-                }}
-              >
-                <span>{label}</span>
-                <b>{count}</b>
-              </button>
-            ))}
-          </div>
-
-          {readyVisible.length > 0 && (
-            <button
-              className="btn secondary awv2-select-all"
-              onClick={selectAllReady}
-            >
-              {readyVisible.every(o =>
-                selectedIds.includes(o.id)
-              )
-                ? t('Clear selection')
-                : `${t('Select ready')} (${readyVisible.length})`}
-            </button>
-          )}
-        </section>
-
-        <div className="awv2-list-head">
-          <div>
-            <h2>{t('Orders')}</h2>
-            <p>
-              {filteredOrders.length} {t('orders in this view')}
-            </p>
           </div>
 
           <button
-            className="btn small secondary"
-            onClick={refresh}
+            type="button"
+            className="tw-secondary-btn"
+            onClick={() => loadBoard(bucket, productId)}
+            disabled={loading}
           >
-            ↻ {t('Refresh')}
+            ↻ {L('Refresh', 'تحديث')}
           </button>
+
+          {bucket === 'READY' && readyVisible.length > 0 && (
+            <button type="button" className="tw-secondary-btn" onClick={selectAllReady}>
+              {readyVisible.every(order => selectedIds.includes(order.id))
+                ? L('Clear selection', 'إلغاء التحديد')
+                : `${L('Select all ready', 'تحديد كل الجاهز')} (${readyVisible.length})`}
+            </button>
+          )}
         </div>
 
-        {filteredOrders.length === 0 ? (
-          <div className="awv2-empty">
-            <div>✓</div>
-            <h3>{t('Queue is clear')}</h3>
-            <p>{t('No orders in this view.')}</p>
+        <div className="tw-products-head">
+          <div>
+            <strong>{L('Products', 'المنتجات')}</strong>
+            <span>{currentBucketCount} {L('orders in this stage', 'طلباً في هذه المرحلة')}</span>
           </div>
-        ) : (
-          <section className="awv2-order-grid">
-            {filteredOrders.map(order => {
-              const sendable = isReady(order)
-              const checked = selectedIds.includes(order.id)
-              const blacklisted =
-                order.call_status === 'BLACKLIST'
+        </div>
 
-              return (
-                <article
-                  className={
-                    checked
-                      ? 'awv2-card selected'
-                      : blacklisted
-                        ? 'awv2-card blacklist'
-                        : 'awv2-card'
-                  }
-                  key={order.id}
-                >
-                  <div className="awv2-card-top">
-                    <div className="awv2-card-order">
-                      {sendable && (
-                        <label
-                          className="awv2-check"
-                          title={t('Select for Digylog')}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() =>
-                              toggleSelected(order.id)
-                            }
-                          />
-                          <span />
-                        </label>
-                      )}
+        <div className="tw-product-strip">
+          <button
+            type="button"
+            className={!productId ? 'tw-product-filter active' : 'tw-product-filter'}
+            onClick={() => setProductId('')}
+          >
+            <span>{L('All products', 'كل المنتجات')}</span>
+            <b>{currentBucketCount}</b>
+          </button>
 
-                      <div>
-                        <small>{t('Order')}</small>
-                        <strong>
-                          {order.order_number || '—'}
-                        </strong>
+          {board.products.map(product => (
+            <button
+              type="button"
+              key={product.id}
+              className={productId === product.id ? 'tw-product-filter active' : 'tw-product-filter'}
+              onClick={() => setProductId(product.id)}
+            >
+              <span>{product.name}</span>
+              <small>{product.sku}</small>
+              <b>{product.count}</b>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <div className="tw-list-head">
+        <div>
+          <h2>{tabs.find(item => item[0] === bucket)?.[1]}</h2>
+          <p>{filteredOrders.length} {L('orders shown', 'طلبات ظاهرة')}</p>
+        </div>
+      </div>
+
+      {loading ? (
+        <div className="tw-empty">
+          <div className="tw-loader" />
+          <strong>{L('Loading orders...', 'جاري تحميل الطلبات...')}</strong>
+        </div>
+      ) : filteredOrders.length === 0 ? (
+        <div className="tw-empty">
+          <div className="tw-empty-icon">✓</div>
+          <h3>{L('No orders in this view', 'لا توجد طلبات في هذه القائمة')}</h3>
+          <p>{L('Choose another stage or product filter.', 'اختر مرحلة أو منتجاً آخر.')}</p>
+        </div>
+      ) : (
+        <section className="tw-order-grid">
+          {filteredOrders.map(order => {
+            const draft = drafts[order.id] || draftFromOrder(order)
+            const offers = order.available_offers || []
+            const selectedOffer = offers.find(offer => offer.id === draft.offer_id)
+            const currentOfferUnavailable =
+              order.offer_id && !offers.some(offer => offer.id === order.offer_id)
+            const editable = !!order.editable && !LOCKED_DELIVERY.has(order.delivery_status)
+            const dirty = orderIsDirty(order)
+            const blacklisted = order.call_status === 'BLACKLIST'
+            const ready = order.call_status === 'CONFIRMED' && order.delivery_status === 'READY'
+            const checked = selectedIds.includes(order.id)
+            const previewTotal = selectedOffer?.price ?? order.total_price
+            const previewQty = selectedOffer?.quantity ?? order.quantity ?? 1
+
+            return (
+              <article
+                className={`tw-order-card${blacklisted ? ' blacklist' : ''}${checked ? ' selected' : ''}`}
+                key={order.id}
+              >
+                <div className="tw-order-top">
+                  <div className="tw-order-id-wrap">
+                    {bucket === 'READY' && ready && (
+                      <label className="tw-check">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleSelected(order.id)}
+                        />
+                        <span />
+                      </label>
+                    )}
+                    <div>
+                      <span className="tw-mini-label">{L('Order', 'الطلب')}</span>
+                      <strong className="tw-order-number">{order.order_number}</strong>
+                      <small>{formatDate(order.created_at)}</small>
+                    </div>
+                  </div>
+
+                  <div className="tw-status-stack">
+                    <span className={`tw-status ${statusClass(order.call_status)}`}>
+                      {statusLabel(order.call_status)}
+                    </span>
+                    {order.delivery_status && order.delivery_status !== 'NOT_READY' && (
+                      <span className={`tw-status ${statusClass(order.delivery_status)}`}>
+                        {statusLabel(order.delivery_status)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {blacklisted && (
+                  <div className="tw-blacklist-box">
+                    <strong>{L('Digylog blacklist', 'القائمة السوداء في Digylog')}</strong>
+                    <span>
+                      {order.delivery_error ||
+                        L(
+                          'Correct the customer phone or delivery information, save, then retry.',
+                          'صحح رقم الهاتف أو بيانات التوصيل، احفظ التعديلات ثم أعد الإرسال.'
+                        )}
+                    </span>
+                  </div>
+                )}
+
+                <div className="tw-customer-summary">
+                  <div>
+                    <span className="tw-mini-label">{L('Customer', 'العميل')}</span>
+                    <strong>{order.customer_name || '—'}</strong>
+                    <a href={`tel:${order.customer_phone || ''}`} dir="ltr">
+                      {order.customer_phone || '—'}
+                    </a>
+                  </div>
+                  <div className="tw-total-box">
+                    <span>{L('Total', 'المجموع')}</span>
+                    <strong>{money(previewTotal, order.currency)}</strong>
+                    <small>× {previewQty}</small>
+                  </div>
+                </div>
+
+                <div className="tw-quick-actions">
+                  <a className="call" href={`tel:${order.customer_phone || ''}`}>
+                    <b>☎</b>
+                    <span>{L('Call', 'اتصال')}</span>
+                  </a>
+                  <a
+                    className="whatsapp"
+                    href={`https://wa.me/${phoneForWhatsApp(order.customer_phone)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    <b>W</b>
+                    <span>WhatsApp</span>
+                  </a>
+                </div>
+
+                <div className="tw-product-box">
+                  <div className="tw-product-avatar">
+                    {order.product_name ? order.product_name.charAt(0).toUpperCase() : 'P'}
+                  </div>
+                  <div className="tw-product-main">
+                    <span>{L('Product', 'المنتج')}</span>
+                    <strong>{order.product_name || '—'}</strong>
+                    <small>{order.product_sku || '—'} · {order.store_name || '—'}</small>
+                  </div>
+                  <div className="tw-product-price">
+                    <span>{L('Qty', 'الكمية')}</span>
+                    <strong>× {previewQty}</strong>
+                  </div>
+                </div>
+
+                {editable ? (
+                  <>
+                    <div className="tw-edit-grid">
+                      <label className="tw-card-field">
+                        <span>{L('Customer name', 'اسم العميل')}</span>
+                        <input
+                          value={draft.customer_name}
+                          onChange={e => setDraftField(order.id, 'customer_name', e.target.value)}
+                        />
+                      </label>
+
+                      <label className="tw-card-field">
+                        <span>{L('Phone', 'الهاتف')}</span>
+                        <input
+                          dir="ltr"
+                          value={draft.phone}
+                          onChange={e => setDraftField(order.id, 'phone', e.target.value)}
+                        />
+                      </label>
+                    </div>
+
+                    <div className="tw-offers-section">
+                      <div className="tw-section-title">
+                        <strong>{L('Offer', 'العرض')}</strong>
+                        <span>{L('Price and quantity come from Product Offers', 'السعر والكمية من عروض المنتج')}</span>
+                      </div>
+
+                      <div className="tw-offer-list">
+                        {offers.map(offer => (
+                          <button
+                            type="button"
+                            key={offer.id}
+                            className={draft.offer_id === offer.id ? 'tw-offer active' : 'tw-offer'}
+                            onClick={() => setDraftField(order.id, 'offer_id', offer.id)}
+                          >
+                            <span>{offer.name}</span>
+                            <small>× {offer.quantity}</small>
+                            <strong>{money(offer.price, order.currency)}</strong>
+                          </button>
+                        ))}
+
+                        {currentOfferUnavailable && (
+                          <div className="tw-offer unavailable">
+                            <span>{order.offer_name || L('Old offer', 'عرض قديم')}</span>
+                            <small>{L('Inactive', 'غير نشط')}</small>
+                            <strong>{money(order.offer_price || order.total_price, order.currency)}</strong>
+                          </div>
+                        )}
+
+                        {offers.length === 0 && !currentOfferUnavailable && (
+                          <div className="tw-no-offer">
+                            {L('No active offers for this product.', 'لا توجد عروض نشطة لهذا المنتج.')}
+                          </div>
+                        )}
                       </div>
                     </div>
 
-                    <div className="awv2-card-status">
-                      <StatusBadge
-                        value={order.call_status}
+                    <div className="tw-edit-grid tw-location-grid">
+                      <div className="tw-card-city">
+                        <CitySelect
+                          value={draft.city}
+                          onChange={city => setDraftField(order.id, 'city', city)}
+                          label={L('Digylog city', 'مدينة Digylog')}
+                          placeholder={L('Search Digylog city...', 'ابحث عن مدينة Digylog...')}
+                          required={false}
+                        />
+                      </div>
+
+                      <label className="tw-card-field">
+                        <span>{L('Address', 'العنوان')}</span>
+                        <textarea
+                          rows="2"
+                          value={draft.address}
+                          onChange={e => setDraftField(order.id, 'address', e.target.value)}
+                          placeholder={L('Full delivery address...', 'العنوان الكامل للتوصيل...')}
+                        />
+                      </label>
+                    </div>
+
+                    <label className="tw-card-field tw-note-field">
+                      <span>{L('Agent note', 'ملاحظة الموظف')}</span>
+                      <textarea
+                        rows="2"
+                        value={draft.call_note}
+                        onChange={e => setDraftField(order.id, 'call_note', e.target.value)}
+                        placeholder={L('Write call notes...', 'اكتب ملاحظات المكالمة...')}
                       />
+                    </label>
 
-                      {order.delivery_status &&
-                        order.delivery_status !== 'NOT_READY' && (
-                          <StatusBadge
-                            value={order.delivery_status}
-                          />
+                    {!blacklisted && (
+                      <div className="tw-outcome-section">
+                        <div className="tw-section-title">
+                          <strong>{L('Call result', 'نتيجة المكالمة')}</strong>
+                          <span>
+                            {L(
+                              'The order moves automatically to the correct stage.',
+                              'سينتقل الطلب تلقائياً إلى المرحلة المناسبة.'
+                            )}
+                          </span>
+                        </div>
+
+                        <div className="tw-outcomes">
+                          <button
+                            type="button"
+                            className="confirm"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'CONFIRMED')}
+                          >
+                            ✓ {L('Confirmed', 'مؤكد')}
+                          </button>
+                          <button
+                            type="button"
+                            className="follow"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'NO_ANSWER')}
+                          >
+                            {L('No answer', 'لا يجيب')}
+                          </button>
+                          <button
+                            type="button"
+                            className="follow"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'VOICEMAIL')}
+                          >
+                            {L('Voicemail', 'صندوق صوتي')}
+                          </button>
+                          <button
+                            type="button"
+                            className="follow"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'BUSY')}
+                          >
+                            {L('Busy', 'مشغول')}
+                          </button>
+                          <button
+                            type="button"
+                            className="callback"
+                            disabled={savingId === order.id}
+                            onClick={() => openCallback(order)}
+                          >
+                            ↻ {L('Schedule follow-up', 'جدولة متابعة')}
+                          </button>
+                          <button
+                            type="button"
+                            className="closed"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'CANCELLED')}
+                          >
+                            {L('Cancelled', 'ملغى')}
+                          </button>
+                          <button
+                            type="button"
+                            className="closed"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'WRONG_NUMBER')}
+                          >
+                            {L('Wrong number', 'رقم خاطئ')}
+                          </button>
+                          <button
+                            type="button"
+                            className="closed"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'DUPLICATE')}
+                          >
+                            {L('Duplicate', 'طلب مكرر')}
+                          </button>
+                          <button
+                            type="button"
+                            className="closed"
+                            disabled={savingId === order.id}
+                            onClick={() => saveOrder(order, 'NOT_INTERESTED')}
+                          >
+                            {L('Not interested', 'غير مهتم')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="tw-card-footer">
+                      <div className="tw-attempts">
+                        <strong>{order.attempt_count || 0}</strong>
+                        <span>{L('call attempts', 'محاولات اتصال')}</span>
+                        {order.last_attempt && (
+                          <small>
+                            {statusLabel(order.last_attempt.outcome)} · {formatDate(order.last_attempt.created_at)}
+                          </small>
                         )}
-                    </div>
-                  </div>
-
-                  {blacklisted && (
-                    <div className="awv2-blacklist-alert">
-                      <strong>
-                        {t('Digylog Blacklist')}
-                      </strong>
-                      <span>
-                        {t(
-                          'Correct the customer information before retrying delivery.'
-                        )}
-                      </span>
-                    </div>
-                  )}
-
-                  <div className="awv2-customer">
-                    <div>
-                      <span className="awv2-label">
-                        {t('Customer')}
-                      </span>
-
-                      <h3>
-                        {order.customer_name || '—'}
-                      </h3>
-
-                      <a
-                        className="awv2-phone"
-                        href={`tel:${order.customer_phone}`}
-                        dir="ltr"
-                      >
-                        {order.customer_phone || '—'}
-                      </a>
-                    </div>
-
-                    <div className="awv2-price">
-                      <span>{t('Total')}</span>
-                      <strong>
-                        {money(
-                          order.total_price,
-                          order.currency
-                        )}
-                      </strong>
-                    </div>
-                  </div>
-
-                  <div className="awv2-info-grid">
-                    <div>
-                      <span>{t('City')}</span>
-                      <strong>
-                        {order.city || '—'}
-                      </strong>
-                    </div>
-
-                    <div>
-                      <span>{t('Store')}</span>
-                      <strong>
-                        {order.store_name || '—'}
-                      </strong>
-                    </div>
-
-                    <div className="wide">
-                      <span>{t('Address')}</span>
-                      <strong>
-                        {order.address ||
-                          t('No address yet')}
-                      </strong>
-                    </div>
-                  </div>
-
-                  <div className="awv2-product">
-                    <div className="awv2-product-icon">
-                      P
-                    </div>
-
-                    <div className="awv2-product-copy">
-                      <span>{t('Product')}</span>
-
-                      <strong>
-                        {order.product_name || '—'}
-                      </strong>
-
-                      <small>
-                        {order.product_sku || '—'}
-                      </small>
-                    </div>
-
-                    <div className="awv2-product-meta">
-                      <div>
-                        <span>{t('Offer')}</span>
-                        <strong>
-                          {order.offer_name ||
-                            t('Standard')}
-                        </strong>
                       </div>
 
-                      <div>
-                        <span>{t('Qty')}</span>
-                        <strong>
-                          {order.quantity || 1}
-                        </strong>
+                      <div className="tw-footer-actions">
+                        {dirty && <span className="tw-unsaved">{L('Unsaved changes', 'تعديلات غير محفوظة')}</span>}
+                        <button
+                          type="button"
+                          className="tw-save-btn"
+                          disabled={savingId === order.id}
+                          onClick={() => saveOrder(order)}
+                        >
+                          {savingId === order.id
+                            ? L('Saving...', 'جاري الحفظ...')
+                            : L('Save changes', 'حفظ التعديلات')}
+                        </button>
                       </div>
                     </div>
-                  </div>
 
-                  {order.call_note && (
-                    <div className="awv2-note">
-                      <span>{t('Agent Note')}</span>
-                      <p>{order.call_note}</p>
-                    </div>
-                  )}
-
-                  <div className="awv2-meta-line">
-                    <span>
-                      {order.source === 'MANUAL' ? t('Manual') : (order.source || '—')}
-                    </span>
-
-                    <span>
-                      {formatCreated(order.created_at)}
-                    </span>
-
-                    {order.delivery_tracking && (
-                      <span className="track">
-                        {t('Tracking')}: {order.delivery_tracking}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="awv2-primary-actions">
-                    <button
-                      className="awv2-action confirm"
-                      onClick={() =>
-                        outcome(order, 'CONFIRMED')
-                      }
-                    >
-                      <strong>✓</strong>
-                      <span>{t('Confirmed')}</span>
-                    </button>
-
-                    <button
-                      className="awv2-action callback"
-                      onClick={() =>
-                        openCallback(order)
-                      }
-                    >
-                      <strong>↻</strong>
-                      <span>{t('Callback')}</span>
-                    </button>
-
-                    <a
-                      className="awv2-action call"
-                      href={`tel:${order.customer_phone}`}
-                    >
-                      <strong>☎</strong>
-                      <span>{t('Call')}</span>
-                    </a>
-
-                    <a
-                      className="awv2-action whatsapp"
-                      href={`https://wa.me/${(
-                        order.customer_phone || ''
-                      ).replace(/\D/g, '')}`}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      <strong>W</strong>
-                      <span>WhatsApp</span>
-                    </a>
-                  </div>
-
-                  <div className="awv2-secondary-actions">
-                    <button
-                      onClick={() =>
-                        outcome(order, 'NO_ANSWER')
-                      }
-                    >
-                      {t('No Answer')}
-                    </button>
-
-                    <button
-                      onClick={() =>
-                        outcome(order, 'BUSY')
-                      }
-                    >
-                      {t('Busy')}
-                    </button>
-
-                    <button
-                      onClick={() =>
-                        outcome(
-                          order,
-                          'NOT_INTERESTED'
-                        )
-                      }
-                    >
-                      {t('Not Interested')}
-                    </button>
-
-                    <button
-                      onClick={() =>
-                        outcome(
-                          order,
-                          'WRONG_NUMBER'
-                        )
-                      }
-                    >
-                      {t('Wrong Number')}
-                    </button>
-
-                    {canEditOrder(order) && (
+                    {(ready || blacklisted) && (
                       <button
-                        className="edit"
-                        onClick={() =>
-                          openEditOrder(order)
-                        }
-                      >
-                        {t('Edit')}
-                      </button>
-                    )}
-                  </div>
-
-                  {(sendable || blacklisted) &&
-                    !isSent(order) && (
-                      <button
-                        className={
-                          blacklisted
-                            ? 'awv2-send retry'
-                            : 'awv2-send'
-                        }
-                        disabled={
-                          dispatchingId === order.id
-                        }
-                        onClick={() =>
-                          dispatchDigylog(order)
-                        }
+                        type="button"
+                        className={blacklisted ? 'tw-dispatch-btn retry' : 'tw-dispatch-btn'}
+                        disabled={dispatchingId === order.id}
+                        onClick={() => dispatchDigylog(order)}
                       >
                         {dispatchingId === order.id
-                          ? t('Sending...')
+                          ? L('Sending...', 'جاري الإرسال...')
                           : blacklisted
-                            ? t('Retry Send to Digylog')
-                            : t('Send to Digylog')}
+                            ? L('Retry send to Digylog', 'إعادة الإرسال إلى Digylog')
+                            : L('Send to Digylog', 'إرسال إلى Digylog')}
                       </button>
                     )}
-                </article>
-              )
-            })}
-          </section>
-        )}
+                  </>
+                ) : (
+                  <div className="tw-readonly-block">
+                    <div>
+                      <span>{L('Offer', 'العرض')}</span>
+                      <strong>{order.offer_name || '—'} · × {order.quantity || 1}</strong>
+                    </div>
+                    <div>
+                      <span>{L('City', 'المدينة')}</span>
+                      <strong>{order.city || '—'}</strong>
+                    </div>
+                    <div className="wide">
+                      <span>{L('Address', 'العنوان')}</span>
+                      <strong>{order.address || '—'}</strong>
+                    </div>
+                    <div className="wide">
+                      <span>{L('Agent note', 'ملاحظة الموظف')}</span>
+                      <strong>{order.call_note || '—'}</strong>
+                    </div>
+                    <div className="wide lock-note">
+                      {L(
+                        'This order was already sent to delivery. Customer/shipping fields are locked to avoid differences with Digylog.',
+                        'تم إرسال هذا الطلب إلى التوصيل. تم قفل بيانات العميل والشحن لتجنب اختلافها عن بيانات Digylog.'
+                      )}
+                    </div>
+                  </div>
+                )}
 
-        {selectedIds.length > 0 && (
-          <div className="awv2-bulk-bar">
-            <div>
-              <span>
-                {t('Selected')}
-              </span>
+                <div className="tw-card-meta">
+                  <span>{order.source || '—'}</span>
+                  {order.delivery_tracking && (
+                    <span dir="ltr">{L('Tracking', 'التتبع')}: {order.delivery_tracking}</span>
+                  )}
+                </div>
+              </article>
+            )
+          })}
+        </section>
+      )}
 
-              <strong>
-                {selectedIds.length}
-              </strong>
-
-              <small>
-                {t('confirmed orders ready for Digylog')}
-              </small>
-            </div>
-
-            <div className="awv2-bulk-buttons">
-              <button
-                className="btn secondary"
-                onClick={() => setSelectedIds([])}
-                disabled={bulkBusy}
-              >
-                {t('Clear')}
-              </button>
-
-              <button
-                className="btn awv2-bulk-send"
-                onClick={bulkDispatch}
-                disabled={bulkBusy}
-              >
-                {bulkBusy
-                  ? t('Sending...')
-                  : `${t('Send Selected to Digylog')} (${selectedIds.length})`}
-              </button>
-            </div>
+      {selectedIds.length > 0 && (
+        <div className="tw-bulk-bar">
+          <div>
+            <span>{L('Selected ready orders', 'الطلبات الجاهزة المحددة')}</span>
+            <strong>{selectedIds.length}</strong>
           </div>
-        )}
-      </div>
+          <div>
+            <button
+              type="button"
+              className="tw-secondary-btn"
+              disabled={bulkBusy}
+              onClick={() => setSelectedIds([])}
+            >
+              {L('Clear', 'إلغاء التحديد')}
+            </button>
+            <button
+              type="button"
+              className="tw-bulk-send"
+              disabled={bulkBusy}
+              onClick={bulkDispatch}
+            >
+              {bulkBusy
+                ? L('Sending...', 'جاري الإرسال...')
+                : `${L('Send selected to Digylog', 'إرسال المحدد إلى Digylog')} (${selectedIds.length})`}
+            </button>
+          </div>
+        </div>
+      )}
 
       <Modal
         open={manualOpen}
-        title="Add Manual Order"
+        title={L('Add new order', 'إضافة طلب جديد')}
         onClose={() => setManualOpen(false)}
         wide
       >
-        {products.length === 0 ? (
+        {manualProducts.length === 0 ? (
           <div className="empty">
-            {t(
-              'No products are assigned to your agent account.'
-            )}
+            {L('No products are assigned to your account.', 'لا توجد منتجات مسندة إلى حسابك.')}
           </div>
         ) : (
-          <form onSubmit={createManualOrder}>
-            <div className="form-grid">
-
-              <div className="field full">
-                <label>{t('Product')}</label>
-
+          <form className="tw-modal-form" onSubmit={createManualOrder}>
+            <div className="tw-modal-grid">
+              <label className="tw-card-field">
+                <span>{L('Product', 'المنتج')}</span>
                 <select
-                  required
                   value={manual.product_id}
-                  onChange={e =>
-                    changeManualProduct(e.target.value)
-                  }
+                  onChange={e => changeManualProduct(e.target.value)}
                 >
-                  {products.map(p => (
-                    <option
-                      key={p.id}
-                      value={p.id}
-                    >
-                      {p.name} — {p.sku}
+                  {manualProducts.map(product => (
+                    <option key={product.id} value={product.id}>
+                      {product.name} — {product.sku}
                     </option>
                   ))}
                 </select>
+              </label>
+
+              <div className="tw-card-field full">
+                <span>{L('Offer', 'العرض')}</span>
+                <div className="tw-offer-list modal-offers">
+                  {(manualProduct?.offers || []).map(offer => (
+                    <button
+                      type="button"
+                      key={offer.id}
+                      className={manual.offer_id === offer.id ? 'tw-offer active' : 'tw-offer'}
+                      onClick={() => setManual(current => ({ ...current, offer_id: offer.id }))}
+                    >
+                      <span>{offer.name}</span>
+                      <small>× {offer.quantity}</small>
+                      <strong>{money(offer.price, manualProduct?.currency || 'MAD')}</strong>
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              {selectedProduct?.offers?.length > 0 && (
-                <div className="field full">
-                  <label>{t('Offer')}</label>
-
-                  <select
-                    value={manual.offer_id}
-                    onChange={e =>
-                      changeOffer(e.target.value)
-                    }
-                  >
-                    <option value="">
-                      {t('Standard price')}
-                    </option>
-
-                    {selectedProduct.offers.map(o => (
-                      <option
-                        key={o.id}
-                        value={o.id}
-                      >
-                        {o.name} — {o.quantity} pcs —{' '}
-                        {money(
-                          o.price,
-                          selectedProduct.currency
-                        )}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              <div className="field">
-                <label>{t('Customer Name')}</label>
-
+              <label className="tw-card-field">
+                <span>{L('Customer name', 'اسم العميل')}</span>
                 <input
                   required
                   value={manual.customer_name}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      customer_name: e.target.value
-                    })
-                  }
+                  onChange={e => setManual(current => ({ ...current, customer_name: e.target.value }))}
                 />
-              </div>
+              </label>
 
-              <div className="field">
-                <label>{t('Phone')}</label>
-
+              <label className="tw-card-field">
+                <span>{L('Phone', 'الهاتف')}</span>
                 <input
                   required
+                  dir="ltr"
                   value={manual.phone}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      phone: e.target.value
-                    })
-                  }
+                  onChange={e => setManual(current => ({ ...current, phone: e.target.value }))}
                 />
-              </div>
+              </label>
 
-              <CitySelect
-                value={manual.city}
-                onChange={city =>
-                  setManual({
-                    ...manual,
-                    city
-                  })
-                }
-                label={t('City')}
-                placeholder={t('Type city name...')}
-              />
-
-              <div className="field">
-                <label>{t('Quantity')}</label>
-
-                <input
-                  type="number"
-                  min="1"
+              <div className="tw-card-city">
+                <CitySelect
+                  value={manual.city}
+                  onChange={city => setManual(current => ({ ...current, city }))}
+                  label={L('Digylog city', 'مدينة Digylog')}
+                  placeholder={L('Search Digylog city...', 'ابحث عن مدينة Digylog...')}
                   required
-                  disabled={!!manual.offer_id}
-                  value={manual.quantity}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      quantity: e.target.value
-                    })
-                  }
                 />
               </div>
 
-              <div className="field full">
-                <label>{t('Address')}</label>
-
+              <label className="tw-card-field">
+                <span>{L('Address', 'العنوان')}</span>
                 <textarea
+                  rows="3"
                   value={manual.address}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      address: e.target.value
-                    })
-                  }
+                  onChange={e => setManual(current => ({ ...current, address: e.target.value }))}
                 />
-              </div>
+              </label>
 
-              <div className="field full">
-                <label>{t('Note')}</label>
-
+              <label className="tw-card-field full">
+                <span>{L('Note', 'ملاحظة')}</span>
                 <textarea
+                  rows="3"
                   value={manual.call_note}
-                  onChange={e =>
-                    setManual({
-                      ...manual,
-                      call_note: e.target.value
-                    })
-                  }
+                  onChange={e => setManual(current => ({ ...current, call_note: e.target.value }))}
                 />
-              </div>
+              </label>
 
-              <div className="field full">
-                <div className="panel">
-                  <strong>{t('Order Total')}</strong>
-
-                  <div
-                    style={{
-                      fontSize: 24,
-                      fontWeight: 800,
-                      marginTop: 6
-                    }}
-                  >
-                    {money(
-                      previewTotal,
-                      selectedProduct?.currency ||
-                        'MAD'
-                    )}
-                  </div>
-
-                  <small>
-                    {t(
-                      'This order will automatically be assigned to you and created as NEW.'
-                    )}
-                  </small>
-                </div>
+              <div className="tw-manual-total full">
+                <span>{L('Order total', 'إجمالي الطلب')}</span>
+                <strong>
+                  {manualOffer
+                    ? money(manualOffer.price, manualProduct?.currency || 'MAD')
+                    : '—'}
+                </strong>
+                <small>
+                  {manualOffer
+                    ? `${manualOffer.name} · × ${manualOffer.quantity}`
+                    : L('Select an offer', 'اختر عرضاً')}
+                </small>
               </div>
             </div>
 
             <div className="form-actions">
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={() =>
-                  setManualOpen(false)
-                }
-              >
-                {t('Cancel')}
+              <button type="button" className="btn secondary" onClick={() => setManualOpen(false)}>
+                {L('Cancel', 'إلغاء')}
               </button>
-
-              <button
-                className="btn"
-                disabled={savingManual}
-              >
-                {savingManual
-                  ? t('Creating...')
-                  : t('Create Order')}
+              <button className="btn" disabled={savingManual || !manualOffer}>
+                {savingManual ? L('Creating...', 'جاري الإنشاء...') : L('Create order', 'إنشاء الطلب')}
               </button>
             </div>
           </form>
@@ -1261,197 +1249,42 @@ export default function WorkspacePage() {
       </Modal>
 
       <Modal
-        open={editOpen}
-        title={t('Edit Order')}
-        onClose={() => setEditOpen(false)}
-        wide
+        open={callbackOpen}
+        title={L('Schedule follow-up', 'جدولة متابعة')}
+        onClose={() => setCallbackOpen(false)}
       >
-        <form onSubmit={saveEditOrder}>
-          <div className="form-grid">
-
-            <div className="field">
-              <label>{t('Customer Name')}</label>
+        <form className="tw-modal-form" onSubmit={saveCallback}>
+          <div className="tw-modal-grid one">
+            <label className="tw-card-field">
+              <span>{L('Date & time', 'التاريخ والوقت')}</span>
               <input
+                type="datetime-local"
                 required
-                value={editForm.customer_name}
-                onChange={e =>
-                  setEditForm({
-                    ...editForm,
-                    customer_name: e.target.value
-                  })
-                }
+                value={callbackAt}
+                onChange={e => setCallbackAt(e.target.value)}
               />
-            </div>
-
-            <div className="field">
-              <label>{t('Phone')}</label>
-              <input
-                required
-                value={editForm.phone}
-                onChange={e =>
-                  setEditForm({
-                    ...editForm,
-                    phone: e.target.value
-                  })
-                }
-              />
-            </div>
-
-            <CitySelect
-              value={editForm.city}
-              onChange={city =>
-                setEditForm({
-                  ...editForm,
-                  city
-                })
-              }
-              label={t('City')}
-              placeholder={t('Type city name...')}
-            />
-
-            <div className="field">
-              <label>{t('Quantity')}</label>
-              <input
-                type="number"
-                min="1"
-                required
-                value={editForm.quantity}
-                onChange={e =>
-                  changeEditQuantity(
-                    e.target.value
-                  )
-                }
-              />
-            </div>
-
-            <div className="field">
-              <label>{t('Unit Price')}</label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                required
-                value={editForm.unit_price}
-                onChange={e =>
-                  changeEditUnitPrice(
-                    e.target.value
-                  )
-                }
-              />
-            </div>
-
-            <div className="field">
-              <label>{t('Total Price')}</label>
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                required
-                value={editForm.total_price}
-                onChange={e =>
-                  setEditForm({
-                    ...editForm,
-                    total_price:
-                      e.target.value
-                  })
-                }
-              />
-            </div>
-
-            <div className="field full">
-              <label>{t('Address')}</label>
+            </label>
+            <label className="tw-card-field">
+              <span>{L('Note', 'ملاحظة')}</span>
               <textarea
-                value={editForm.address}
-                onChange={e =>
-                  setEditForm({
-                    ...editForm,
-                    address: e.target.value
-                  })
-                }
+                rows="4"
+                value={callbackNote}
+                onChange={e => setCallbackNote(e.target.value)}
               />
-            </div>
-
-            <div className="field full">
-              <label>{t('Note')}</label>
-              <textarea
-                value={editForm.call_note}
-                onChange={e =>
-                  setEditForm({
-                    ...editForm,
-                    call_note: e.target.value
-                  })
-                }
-              />
-            </div>
+            </label>
           </div>
 
           <div className="form-actions">
-            <button
-              type="button"
-              className="btn secondary"
-              onClick={() => setEditOpen(false)}
-            >
-              {t('Cancel')}
+            <button type="button" className="btn secondary" onClick={() => setCallbackOpen(false)}>
+              {L('Cancel', 'إلغاء')}
             </button>
-
-            <button
-              className="btn success"
-              disabled={savingEdit}
-            >
-              {savingEdit
-                ? t('Saving...')
-                : t('Save Changes')}
+            <button className="btn" disabled={callbackBusy}>
+              {callbackBusy ? L('Saving...', 'جاري الحفظ...') : L('Schedule', 'جدولة')}
             </button>
           </div>
         </form>
       </Modal>
-
-      <Modal
-        open={cbOpen}
-        title="Schedule Callback"
-        onClose={() => setCbOpen(false)}
-      >
-        <form onSubmit={callback}>
-
-          <div className="field">
-            <label>{t('Date & Time')}</label>
-
-            <input
-              type="datetime-local"
-              required
-              value={cbTime}
-              onChange={e =>
-                setCbTime(e.target.value)
-              }
-            />
-          </div>
-
-          <div className="field">
-            <label>{t('Note')}</label>
-
-            <textarea
-              value={cbNote}
-              onChange={e =>
-                setCbNote(e.target.value)
-              }
-            />
-          </div>
-
-          <div className="form-actions">
-            <button
-              type="button"
-              className="btn secondary"
-              onClick={() => setCbOpen(false)}
-            >
-              {t('Cancel')}
-            </button>
-
-            <button className="btn">
-              {t('Schedule')}
-            </button>
-          </div>
-        </form>
-      </Modal>
-    </>
+    </div>
   )
 }
+

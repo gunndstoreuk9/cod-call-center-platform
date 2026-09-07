@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '../lib/api'
+import { useI18n } from '../lib/i18n'
 
 let cachedCities = null
 
@@ -9,8 +10,14 @@ export default function CitySelect({
   value = '',
   onChange,
   label = 'City',
-  placeholder = 'Type city name...'
+  placeholder = 'Type city name...',
+  required = true,
+  disabled = false
 }) {
+  const { locale } = useI18n()
+  const isAr = locale === 'ar'
+  const L = (en, ar) => (isAr ? ar : en)
+
   const [cities, setCities] = useState(cachedCities || [])
   const [query, setQuery] = useState(value || '')
   const [open, setOpen] = useState(false)
@@ -35,7 +42,7 @@ export default function CitySelect({
       })
       .catch(err => {
         if (!alive) return
-        setError(err.message || 'Could not load cities')
+        setError(err.message || L('Could not load cities', 'تعذر تحميل المدن'))
       })
       .finally(() => {
         if (alive) setLoading(false)
@@ -44,18 +51,14 @@ export default function CitySelect({
     return () => {
       alive = false
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   useEffect(() => {
-    const close = e => {
-      if (rootRef.current && !rootRef.current.contains(e.target)) {
+    const close = event => {
+      if (rootRef.current && !rootRef.current.contains(event.target)) {
         setOpen(false)
-
-        if (!value) {
-          setQuery('')
-        } else {
-          setQuery(value)
-        }
+        setQuery(value || '')
       }
     }
 
@@ -65,20 +68,15 @@ export default function CitySelect({
 
   const results = useMemo(() => {
     const q = query.trim().toLocaleLowerCase()
-
     const rows = q
-      ? cities.filter(city =>
-          city.toLocaleLowerCase().includes(q)
-        )
+      ? cities.filter(city => city.toLocaleLowerCase().includes(q))
       : cities
 
     return rows.slice(0, 80)
   }, [cities, query])
 
-  const type = e => {
-    setQuery(e.target.value)
-
-    // Typing is only search. It is NOT a valid city selection.
+  const type = event => {
+    setQuery(event.target.value)
     onChange('')
     setOpen(true)
   }
@@ -97,18 +95,17 @@ export default function CitySelect({
         <input
           type="text"
           autoComplete="off"
-          required
+          required={required}
+          disabled={disabled}
           value={query}
-          placeholder={loading ? 'Loading cities...' : placeholder}
-          onFocus={() => setOpen(true)}
+          placeholder={loading ? L('Loading cities...', 'جاري تحميل المدن...') : placeholder}
+          onFocus={() => !disabled && setOpen(true)}
           onChange={type}
         />
 
-        {value && (
-          <span className="city-selected-mark">✓</span>
-        )}
+        {value && <span className="city-selected-mark">✓</span>}
 
-        {open && !loading && (
+        {open && !loading && !disabled && (
           <div className="city-dropdown">
             {error ? (
               <div className="city-empty">{error}</div>
@@ -117,12 +114,8 @@ export default function CitySelect({
                 <button
                   type="button"
                   key={city}
-                  className={
-                    city === value
-                      ? 'city-option selected'
-                      : 'city-option'
-                  }
-                  onMouseDown={e => e.preventDefault()}
+                  className={city === value ? 'city-option selected' : 'city-option'}
+                  onMouseDown={event => event.preventDefault()}
                   onClick={() => selectCity(city)}
                 >
                   {city}
@@ -130,18 +123,22 @@ export default function CitySelect({
               ))
             ) : (
               <div className="city-empty">
-                No matching Digylog city
+                {L('No matching Digylog city', 'لا توجد مدينة مطابقة في Digylog')}
               </div>
             )}
           </div>
         )}
       </div>
 
-      {!value && query && (
+      {!value && query && !disabled && (
         <small className="city-help">
-          Select a city from the Digylog list.
+          {L(
+            'Select a city from the Digylog list.',
+            'اختر مدينة من قائمة Digylog.'
+          )}
         </small>
       )}
     </div>
   )
 }
+
