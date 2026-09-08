@@ -14,6 +14,7 @@ const adminLinks = [
   ['/admin/agents', 'Agents','agents'],
   ['/admin/payments', 'Payments','payments'],
   ['/admin/profit', 'Profit Center','profit'],
+  ['/admin/ads-finance', 'Ads Finance','profit'],
   ['/admin/connections', 'Connections','integrations'],
   ['/admin/callbacks', 'Callbacks','callbacks'],
   ['/admin/integrations', 'Integrations','integrations'],
