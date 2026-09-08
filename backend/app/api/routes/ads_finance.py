@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import uuid
+
 from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -57,6 +59,13 @@ class TopupRuleRequest(BaseModel):
         default=30,
         ge=5,
         le=1440,
+    )
+
+
+class DemoTopupRequest(BaseModel):
+    amount: Decimal = Field(
+        ge=Decimal("0.01"),
+        le=Decimal("100000"),
     )
 
 
@@ -1074,3 +1083,176 @@ def list_ad_finance_transactions(
         }
         for row in rows
     ]
+
+
+
+@router.post(
+    "/accounts/{account_id}/demo-topup"
+)
+def demo_manual_topup(
+    account_id: str,
+    payload: DemoTopupRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+        )
+    ),
+):
+    account = account_or_404(
+        db,
+        account_id,
+    )
+
+    provider_payload = dict(
+        account.provider_payload or {}
+    )
+
+    if not provider_payload.get("demo"):
+        raise HTTPException(
+            400,
+            "Demo top-up is only available for demo accounts",
+        )
+
+    before = money(
+        account.current_balance
+    )
+
+    amount = money(
+        payload.amount
+    )
+
+    after = before + amount
+
+    transaction = AdFinanceTransaction(
+        integration_id=
+            account.integration_id,
+
+        ad_account_id=
+            account.id,
+
+        funding_account_id=None,
+
+        provider=
+            account.provider,
+
+        transaction_type=
+            "DEMO_MANUAL_TOPUP",
+
+        direction="CREDIT",
+
+        amount=amount,
+
+        currency=
+            account.currency,
+
+        balance_before=
+            before,
+
+        balance_after=
+            after,
+
+        idempotency_key=(
+            "demo-topup-"
+            + uuid.uuid4().hex
+        ),
+
+        provider_transaction_id=(
+            "DEMO-"
+            + uuid.uuid4().hex[:16]
+        ),
+
+        provider_reference=
+            "CODOPS DEMO TOP-UP",
+
+        status="SUCCESS",
+
+        attempt_count=1,
+
+        initiated_by_user_id=
+            user.id,
+
+        last_checked_at=
+            utcnow(),
+
+        completed_at=
+            utcnow(),
+
+        created_at=
+            utcnow(),
+
+        updated_at=
+            utcnow(),
+    )
+
+    account.current_balance = after
+
+    account.balance_synced_at = (
+        utcnow()
+    )
+
+    db.add(transaction)
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="AD_DEMO_MANUAL_TOPUP",
+        entity_type="AD_ACCOUNT",
+        entity_id=account.id,
+        before={
+            "balance":
+                str(before),
+        },
+        after={
+            "amount":
+                str(amount),
+
+            "balance":
+                str(after),
+
+            "transaction_id":
+                transaction.id,
+        },
+    )
+
+    db.commit()
+
+    db.refresh(account)
+    db.refresh(transaction)
+
+    return {
+        "ok": True,
+
+        "account":
+            account_out(
+                db,
+                account,
+            ),
+
+        "transaction": {
+            "id":
+                transaction.id,
+
+            "type":
+                transaction.transaction_type,
+
+            "amount":
+                str(transaction.amount),
+
+            "currency":
+                transaction.currency,
+
+            "balance_before":
+                str(transaction.balance_before),
+
+            "balance_after":
+                str(transaction.balance_after),
+
+            "status":
+                transaction.status,
+
+            "created_at":
+                transaction.created_at,
+        },
+    }

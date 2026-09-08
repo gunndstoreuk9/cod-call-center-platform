@@ -36,6 +36,9 @@ export default function AdsFinancePage() {
   const [demoBalance, setDemoBalance] = useState('25')
   const [demoSpend, setDemoSpend] = useState('8')
 
+  const [topupAccount, setTopupAccount] = useState(null)
+  const [topupAmount, setTopupAmount] = useState('20')
+
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [saving, setSaving] = useState(false)
@@ -183,6 +186,51 @@ export default function AdsFinancePage() {
       await load()
     } catch (e2) {
       setError(e2.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const openDemoTopup = account => {
+    setTopupAccount(account)
+
+    setTopupAmount(
+      account.rule?.refill_amount || '20'
+    )
+  }
+
+  const saveDemoTopup = async e => {
+    e.preventDefault()
+
+    if (!topupAccount) return
+
+    setSaving(true)
+    setError('')
+
+    try {
+      const result = await api(
+        `/ads-finance/accounts/${topupAccount.id}/demo-topup`,
+        {
+          method: 'POST',
+
+          body: {
+            amount:
+              Number(topupAmount || 0)
+          }
+        }
+      )
+
+      setTopupAccount(null)
+
+      flash(
+        `Demo top-up completed: +${result.transaction?.amount || topupAmount} ${result.transaction?.currency || topupAccount.currency}.`
+      )
+
+      await load()
+
+    } catch (e2) {
+      setError(e2.message)
+
     } finally {
       setSaving(false)
     }
@@ -506,14 +554,25 @@ export default function AdsFinancePage() {
                       </button>
 
                       {account.demo && (
-                        <button
-                          className="btn small"
-                          onClick={() =>
-                            openDemo(account)
-                          }
-                        >
-                          Simulate
-                        </button>
+                        <>
+                          <button
+                            className="btn small"
+                            onClick={() =>
+                              openDemoTopup(account)
+                            }
+                          >
+                            Demo Top Up
+                          </button>
+
+                          <button
+                            className="btn small secondary"
+                            onClick={() =>
+                              openDemo(account)
+                            }
+                          >
+                            Simulate
+                          </button>
+                        </>
                       )}
                     </div>
                   </td>
@@ -712,6 +771,103 @@ export default function AdsFinancePage() {
               {saving
                 ? 'Saving...'
                 : 'Save Rule'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal
+        open={!!topupAccount}
+        title="Demo Manual Top-Up"
+        onClose={() => {
+          if (!saving) {
+            setTopupAccount(null)
+          }
+        }}
+      >
+        <form onSubmit={saveDemoTopup}>
+          <div className="af-lock-box safe">
+            <strong>Demo Transaction Only</strong>
+
+            <span>
+              This simulates a successful funding
+              transaction. No real money can move.
+            </span>
+          </div>
+
+          {topupAccount && (
+            <div className="connection-step-note">
+              <strong>
+                {topupAccount.name}
+              </strong>
+
+              <span>
+                Current balance:
+                {' '}
+                {topupAccount.balance}
+                {' '}
+                {topupAccount.currency}
+              </span>
+            </div>
+          )}
+
+          <div className="field">
+            <label>
+              Top-Up Amount
+            </label>
+
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              required
+              value={topupAmount}
+              onChange={e =>
+                setTopupAmount(
+                  e.target.value
+                )
+              }
+            />
+
+            {topupAccount && (
+              <small>
+                Expected balance after top-up:
+                {' '}
+                {
+                  (
+                    Number(
+                      topupAccount.balance || 0
+                    ) +
+                    Number(
+                      topupAmount || 0
+                    )
+                  ).toFixed(2)
+                }
+                {' '}
+                {topupAccount.currency}
+              </small>
+            )}
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={saving}
+              onClick={() =>
+                setTopupAccount(null)
+              }
+            >
+              Cancel
+            </button>
+
+            <button
+              className="btn"
+              disabled={saving}
+            >
+              {saving
+                ? 'Processing...'
+                : 'Complete Demo Top-Up'}
             </button>
           </div>
         </form>
