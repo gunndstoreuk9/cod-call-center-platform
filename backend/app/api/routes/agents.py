@@ -6,9 +6,10 @@ from sqlalchemy.orm import Session
 from app.core.db import get_db
 from app.core.deps import current_user, require_roles
 from app.core.security import hash_password
-from app.core.time import date_bounds
-from app.models import AgentProduct, Order, PayoutEntry, Product, User
+from app.core.time import date_bounds, utcnow
+from app.models import AgentProduct, Order, OrderAssignment, PayoutEntry, Product, User
 from app.schemas import AgentCreate, AgentOut, AgentUpdate
+from app.services.assignment import OPEN_CALL_STATUSES, choose_agent
 from app.services.audit import log_action
 from app.services.payouts import unpaid_balance
 
@@ -107,6 +108,128 @@ def update_agent(
     db.commit()
     db.refresh(agent)
     return agent_payload(db, agent)
+
+
+
+@router.post("/{agent_id}/remove")
+def remove_agent(
+    agent_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OWNER", "ADMIN")),
+):
+    agent = (
+        db.query(User)
+        .filter(
+            User.id == agent_id,
+            User.role == "AGENT",
+        )
+        .first()
+    )
+
+    if not agent:
+        raise HTTPException(404, "Agent not found")
+
+    open_orders = (
+        db.query(Order)
+        .filter(
+            Order.assigned_agent_id == agent.id,
+            Order.call_status.in_(OPEN_CALL_STATUSES),
+        )
+        .order_by(Order.created_at.asc())
+        .all()
+    )
+
+    before = {
+        "display_name": agent.display_name,
+        "is_active": agent.is_active,
+        "open_leads": len(open_orders),
+    }
+
+    # Immediately block login and future auto assignment.
+    agent.is_active = False
+
+    # Remove product access.
+    db.query(AgentProduct).filter(
+        AgentProduct.agent_id == agent.id
+    ).delete(synchronize_session=False)
+
+    db.flush()
+
+    reassigned = 0
+    unassigned = 0
+
+    for order in open_orders:
+        now = utcnow()
+
+        # Close the previous active assignment history entry.
+        previous_assignment = (
+            db.query(OrderAssignment)
+            .filter(
+                OrderAssignment.order_id == order.id,
+                OrderAssignment.agent_id == agent.id,
+                OrderAssignment.released_at.is_(None),
+            )
+            .order_by(OrderAssignment.assigned_at.desc())
+            .first()
+        )
+
+        if previous_assignment:
+            previous_assignment.released_at = now
+
+        # Smart balancer now ignores the removed agent because
+        # the agent is inactive and has no product access.
+        new_agent = choose_agent(db, order.product_id)
+
+        if new_agent:
+            order.assigned_agent_id = new_agent.id
+            order.assigned_at = now
+
+            db.add(
+                OrderAssignment(
+                    order_id=order.id,
+                    agent_id=new_agent.id,
+                    assigned_by_user_id=user.id,
+                    assignment_type="AGENT_REMOVAL_REASSIGN",
+                )
+            )
+
+            reassigned += 1
+        else:
+            # Keep the lead safely unassigned if no eligible agent exists.
+            order.assigned_agent_id = None
+            order.assigned_at = None
+            unassigned += 1
+
+        # Important: next choose_agent() sees the updated workloads.
+        db.flush()
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="AGENT_REMOVED",
+        entity_type="AGENT",
+        entity_id=agent.id,
+        before=before,
+        after={
+            "is_active": False,
+            "products_removed": True,
+            "open_leads": len(open_orders),
+            "reassigned": reassigned,
+            "unassigned": unassigned,
+        },
+    )
+
+    db.commit()
+
+    return {
+        "ok": True,
+        "agent_id": agent.id,
+        "display_name": agent.display_name,
+        "open_leads": len(open_orders),
+        "reassigned": reassigned,
+        "unassigned": unassigned,
+        "message": "Agent removed and open leads redistributed.",
+    }
 
 
 @router.get("/{agent_id}/stats")

@@ -95,6 +95,42 @@ export default function AgentsPage() {
     }
   }
 
+  const removeAgent = async a => {
+    const confirmed = window.confirm(
+      `Remove ${a.display_name}?\n\n` +
+      `This will:\n` +
+      `• Block login access\n` +
+      `• Stop future lead assignments\n` +
+      `• Remove product access\n` +
+      `• Redistribute open leads\n` +
+      `• Keep historical orders and payouts`
+    )
+
+    if (!confirmed) return
+
+    setSaving(true)
+    setError('')
+
+    try {
+      const result = await api(`/agents/${a.id}/remove`, {
+        method: 'POST'
+      })
+
+      window.alert(
+        `Agent removed.\n\n` +
+        `Open leads: ${result.open_leads}\n` +
+        `Reassigned: ${result.reassigned}\n` +
+        `Unassigned: ${result.unassigned}`
+      )
+
+      await load()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const openAccess = agent => {
     setSelectedAgent(agent)
     setAccessProducts(agent.product_ids || [])
@@ -225,6 +261,14 @@ export default function AgentsPage() {
                         onClick={() => toggle(a)}
                       >
                         {a.is_active ? t('Disable') : t('Enable')}
+                      </button>
+
+                      <button
+                        className="btn small danger"
+                        disabled={saving}
+                        onClick={() => removeAgent(a)}
+                      >
+                        Remove
                       </button>
                     </div>
                   </td>
