@@ -523,6 +523,681 @@ class IntegrationConfig(Base):
     updated_at: Mapped[object] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+
+class AdAccount(Base):
+    __tablename__ = "ad_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_account_id",
+            name="uq_ad_accounts_provider_external",
+        ),
+        Index(
+            "ix_ad_accounts_provider_status",
+            "provider",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    integration_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "integration_configs.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    store_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "stores.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    external_account_id: Mapped[str] = mapped_column(
+        String(180),
+        index=True,
+    )
+
+    external_business_id: Mapped[str | None] = mapped_column(
+        String(180),
+        nullable=True,
+        index=True,
+    )
+
+    external_business_name: Mapped[str | None] = mapped_column(
+        String(180),
+        nullable=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(180),
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(10),
+        default="USD",
+    )
+
+    current_balance: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+        default=Decimal("0"),
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="UNKNOWN",
+        index=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        index=True,
+    )
+
+    provider_payload: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+    )
+
+    balance_synced_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    spend_synced_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class AdAccountProductMap(Base):
+    __tablename__ = "ad_account_product_maps"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_account_id",
+            "product_id",
+            name="uq_ad_account_product_map",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    ad_account_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "ad_accounts.id",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+
+    product_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "products.id",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        index=True,
+    )
+
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+
+class AdFundingAccount(Base):
+    __tablename__ = "ad_funding_accounts"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_account_id",
+            name="uq_ad_funding_provider_external",
+        ),
+        Index(
+            "ix_ad_funding_provider_status",
+            "provider",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    integration_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "integration_configs.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    external_account_id: Mapped[str] = mapped_column(
+        String(180),
+        index=True,
+    )
+
+    name: Mapped[str] = mapped_column(
+        String(180),
+    )
+
+    account_type: Mapped[str] = mapped_column(
+        String(40),
+        default="BALANCE",
+        index=True,
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(10),
+        default="USD",
+    )
+
+    current_balance: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+        default=Decimal("0"),
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="UNKNOWN",
+        index=True,
+    )
+
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        index=True,
+    )
+
+    provider_payload: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+    )
+
+    balance_synced_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    last_error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class AdTopupRule(Base):
+    __tablename__ = "ad_topup_rules"
+    __table_args__ = (
+        UniqueConstraint(
+            "ad_account_id",
+            name="uq_ad_topup_rule_account",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    ad_account_id: Mapped[str] = mapped_column(
+        ForeignKey(
+            "ad_accounts.id",
+            ondelete="CASCADE",
+        ),
+        index=True,
+    )
+
+    funding_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "ad_funding_accounts.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    threshold_balance: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+        default=Decimal("0"),
+    )
+
+    refill_amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+        default=Decimal("0"),
+    )
+
+    daily_cap: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+
+    monthly_cap: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+
+    cooldown_minutes: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+    )
+
+    auto_enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        index=True,
+    )
+
+    last_triggered_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    created_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    updated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class AdFinanceTransaction(Base):
+    __tablename__ = "ad_finance_transactions"
+    __table_args__ = (
+        UniqueConstraint(
+            "idempotency_key",
+            name="uq_ad_finance_transaction_idempotency",
+        ),
+        Index(
+            "ix_ad_finance_account_created",
+            "ad_account_id",
+            "created_at",
+        ),
+        Index(
+            "ix_ad_finance_provider_status",
+            "provider",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    integration_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "integration_configs.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    ad_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "ad_accounts.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    funding_account_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "ad_funding_accounts.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    transaction_type: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    direction: Mapped[str] = mapped_column(
+        String(20),
+        default="CREDIT",
+        index=True,
+    )
+
+    amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 4),
+    )
+
+    currency: Mapped[str] = mapped_column(
+        String(10),
+        default="USD",
+    )
+
+    balance_before: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+
+    balance_after: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 4),
+        nullable=True,
+    )
+
+    idempotency_key: Mapped[str] = mapped_column(
+        String(180),
+    )
+
+    provider_transaction_id: Mapped[str | None] = mapped_column(
+        String(180),
+        nullable=True,
+        index=True,
+    )
+
+    provider_reference: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="PENDING",
+        index=True,
+    )
+
+    attempt_count: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
+    error_code: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+    )
+
+    error_message: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    initiated_by_user_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+    )
+
+    last_checked_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    completed_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    updated_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        onupdate=utcnow,
+    )
+
+
+class AdProviderWebhookEvent(Base):
+    __tablename__ = "ad_provider_webhook_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "external_event_id",
+            name="uq_ad_provider_webhook_event",
+        ),
+        Index(
+            "ix_ad_provider_webhook_status",
+            "provider",
+            "status",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    integration_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "integration_configs.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    external_event_id: Mapped[str] = mapped_column(
+        String(255),
+        index=True,
+    )
+
+    event_type: Mapped[str] = mapped_column(
+        String(100),
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="RECEIVED",
+        index=True,
+    )
+
+    payload: Mapped[dict] = mapped_column(
+        JSON,
+        default=dict,
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    processed_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    received_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+
+class AdSyncRun(Base):
+    __tablename__ = "ad_sync_runs"
+    __table_args__ = (
+        Index(
+            "ix_ad_sync_provider_started",
+            "provider",
+            "started_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=uuid4_str,
+    )
+
+    integration_id: Mapped[str | None] = mapped_column(
+        ForeignKey(
+            "integration_configs.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    provider: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    sync_type: Mapped[str] = mapped_column(
+        String(40),
+        index=True,
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(40),
+        default="RUNNING",
+        index=True,
+    )
+
+    accounts_scanned: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
+    accounts_updated: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+    )
+
+    error: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    started_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+        index=True,
+    )
+
+    finished_at: Mapped[object | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+    created_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        default=utcnow,
+    )
+
+
 class IntegrationEvent(Base):
     __tablename__ = "integration_events"
     __table_args__ = (Index("ix_integration_event_created", "integration_id", "created_at"),)

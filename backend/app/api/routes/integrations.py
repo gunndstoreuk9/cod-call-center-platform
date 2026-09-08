@@ -62,6 +62,15 @@ def _integration_or_404(db: Session, integration_id: str, provider: str | None =
     row = db.query(IntegrationConfig).filter(IntegrationConfig.id == integration_id).first()
     if not row:
         raise HTTPException(404, "Integration not found")
+    if (
+        provider is None
+        and row.provider not in SUPPORTED_PROVIDERS
+    ):
+        raise HTTPException(
+            404,
+            "Integration not found",
+        )
+
     if provider and row.provider != provider:
         raise HTTPException(400, f"Integration is not {provider}")
     return row
@@ -74,7 +83,11 @@ def list_integrations(
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
-    q = db.query(IntegrationConfig)
+    q = db.query(IntegrationConfig).filter(
+        IntegrationConfig.provider.in_(
+            list(SUPPORTED_PROVIDERS)
+        )
+    )
     if provider:
         q = q.filter(IntegrationConfig.provider == _provider(provider))
     if store_id:
