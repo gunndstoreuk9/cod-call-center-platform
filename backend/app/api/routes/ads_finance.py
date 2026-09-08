@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import timedelta, timezone
 
 import uuid
 
@@ -6,11 +7,12 @@ from decimal import Decimal, InvalidOperation
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
 from app.core.deps import require_roles
-from app.core.time import utcnow
+from app.core.time import date_bounds, utcnow
 from app.models import (
     AdAccount,
     AdAccountProductMap,
@@ -116,6 +118,33 @@ def money(value) -> Decimal:
         ValueError,
     ):
         return Decimal("0")
+
+
+
+def demo_auto_topup_total(
+    db: Session,
+    account_id: str,
+    start,
+    end,
+) -> Decimal:
+    value = (
+        db.query(
+            func.coalesce(
+                func.sum(AdFinanceTransaction.amount),
+                0,
+            )
+        )
+        .filter(
+            AdFinanceTransaction.ad_account_id == account_id,
+            AdFinanceTransaction.transaction_type == "DEMO_AUTO_TOPUP",
+            AdFinanceTransaction.status == "SUCCESS",
+            AdFinanceTransaction.created_at >= start,
+            AdFinanceTransaction.created_at < end,
+        )
+        .scalar()
+    )
+
+    return money(value)
 
 
 def account_or_404(
@@ -1894,4 +1923,338 @@ def demo_manual_topup(
             "created_at":
                 transaction.created_at,
         },
+    }
+
+
+@router.post("/accounts/{account_id}/demo-auto-check")
+def demo_auto_rule_check(
+    account_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles("OWNER", "ADMIN")
+    ),
+):
+    account = account_or_404(db, account_id)
+
+    account_payload = dict(
+        account.provider_payload or {}
+    )
+
+    if not account_payload.get("demo"):
+        raise HTTPException(
+            400,
+            "Demo auto check is only available for demo accounts",
+        )
+
+    rule = account_rule(
+        db,
+        account.id,
+    )
+
+    if not rule:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "NO_RULE",
+            "message": "No funding rule configured.",
+        }
+
+    balance = money(
+        account.current_balance
+    )
+
+    threshold = money(
+        rule.threshold_balance
+    )
+
+    amount = money(
+        rule.refill_amount
+    )
+
+    # --------------------------------------------------------
+    # Trigger condition
+    # --------------------------------------------------------
+    if balance > threshold:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "BALANCE_ABOVE_THRESHOLD",
+            "message": "Balance is above the funding threshold.",
+            "balance": str(balance),
+            "threshold": str(threshold),
+        }
+
+    if amount <= 0:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "INVALID_REFILL_AMOUNT",
+            "message": "Refill amount must be greater than zero.",
+        }
+
+    # --------------------------------------------------------
+    # Funding source
+    # --------------------------------------------------------
+    if not rule.funding_account_id:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "NO_FUNDING_SOURCE",
+            "message": "No funding source selected.",
+        }
+
+    funding = funding_or_404(
+        db,
+        rule.funding_account_id,
+    )
+
+    funding_payload = dict(
+        funding.provider_payload or {}
+    )
+
+    if not funding_payload.get("demo"):
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "FUNDING_SOURCE_NOT_DEMO",
+            "message": "Demo auto check requires a demo funding source.",
+        }
+
+    if not funding.is_active:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "FUNDING_SOURCE_DISABLED",
+            "message": "Funding source is disabled.",
+        }
+
+    if funding.status != "ACTIVE":
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "FUNDING_SOURCE_INACTIVE",
+            "message": "Funding source is not active.",
+        }
+
+    if funding.currency != account.currency:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "CURRENCY_MISMATCH",
+            "message": "Funding source currency does not match ad account.",
+        }
+
+    now = utcnow()
+
+    # --------------------------------------------------------
+    # Cooldown
+    # --------------------------------------------------------
+    if rule.last_triggered_at:
+        last_triggered = rule.last_triggered_at
+
+        if getattr(last_triggered, "tzinfo", None) is None:
+            last_triggered = last_triggered.replace(
+                tzinfo=timezone.utc
+            )
+
+        cooldown_until = (
+            last_triggered
+            + timedelta(
+                minutes=rule.cooldown_minutes
+            )
+        )
+
+        if now < cooldown_until:
+            seconds_remaining = max(
+                0,
+                int(
+                    (
+                        cooldown_until
+                        - now
+                    ).total_seconds()
+                ),
+            )
+
+            return {
+                "ok": True,
+                "triggered": False,
+                "reason": "COOLDOWN_ACTIVE",
+                "message": "Cooldown is still active.",
+                "seconds_remaining": seconds_remaining,
+            }
+
+    # --------------------------------------------------------
+    # Daily / Monthly caps
+    # --------------------------------------------------------
+    day_start, day_end = date_bounds(
+        "today"
+    )
+
+    month_start, month_end = date_bounds(
+        "this_month"
+    )
+
+    daily_used = demo_auto_topup_total(
+        db,
+        account.id,
+        day_start,
+        day_end,
+    )
+
+    monthly_used = demo_auto_topup_total(
+        db,
+        account.id,
+        month_start,
+        month_end,
+    )
+
+    daily_cap = (
+        money(rule.daily_cap)
+        if rule.daily_cap is not None
+        else None
+    )
+
+    monthly_cap = (
+        money(rule.monthly_cap)
+        if rule.monthly_cap is not None
+        else None
+    )
+
+    if (
+        daily_cap is not None
+        and daily_used + amount > daily_cap
+    ):
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "DAILY_CAP_EXCEEDED",
+            "message": "Daily automatic funding cap would be exceeded.",
+            "used": str(daily_used),
+            "cap": str(daily_cap),
+            "requested": str(amount),
+        }
+
+    if (
+        monthly_cap is not None
+        and monthly_used + amount > monthly_cap
+    ):
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "MONTHLY_CAP_EXCEEDED",
+            "message": "Monthly automatic funding cap would be exceeded.",
+            "used": str(monthly_used),
+            "cap": str(monthly_cap),
+            "requested": str(amount),
+        }
+
+    # --------------------------------------------------------
+    # Funding balance
+    # --------------------------------------------------------
+    funding_before = money(
+        funding.current_balance
+    )
+
+    if funding_before < amount:
+        return {
+            "ok": True,
+            "triggered": False,
+            "reason": "INSUFFICIENT_FUNDING_BALANCE",
+            "message": "Insufficient funding wallet balance.",
+            "funding_balance": str(funding_before),
+            "requested": str(amount),
+        }
+
+    # --------------------------------------------------------
+    # Execute DEMO transaction only
+    # --------------------------------------------------------
+    ad_before = balance
+    ad_after = ad_before + amount
+    funding_after = funding_before - amount
+
+    transaction = AdFinanceTransaction(
+        integration_id=account.integration_id,
+        ad_account_id=account.id,
+        funding_account_id=funding.id,
+        provider=account.provider,
+        transaction_type="DEMO_AUTO_TOPUP",
+        direction="CREDIT",
+        amount=amount,
+        currency=account.currency,
+        balance_before=ad_before,
+        balance_after=ad_after,
+        idempotency_key=(
+            "demo-auto-topup-"
+            + uuid.uuid4().hex
+        ),
+        provider_transaction_id=(
+            "DEMO-AUTO-"
+            + uuid.uuid4().hex[:16]
+        ),
+        provider_reference=(
+            f"{funding.name} | DEMO AUTO | "
+            f"{funding_before} -> {funding_after}"
+        ),
+        status="SUCCESS",
+        attempt_count=1,
+        initiated_by_user_id=user.id,
+        last_checked_at=now,
+        completed_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    account.current_balance = ad_after
+    account.balance_synced_at = now
+
+    funding.current_balance = funding_after
+    funding.balance_synced_at = now
+    funding.updated_at = now
+
+    rule.last_triggered_at = now
+    rule.updated_by_user_id = user.id
+    rule.updated_at = now
+
+    db.add(transaction)
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="AD_DEMO_AUTO_TOPUP",
+        entity_type="AD_ACCOUNT",
+        entity_id=account.id,
+        before={
+            "ad_balance": str(ad_before),
+            "funding_balance": str(funding_before),
+            "daily_auto_used": str(daily_used),
+            "monthly_auto_used": str(monthly_used),
+        },
+        after={
+            "amount": str(amount),
+            "ad_balance": str(ad_after),
+            "funding_balance": str(funding_after),
+            "transaction_id": transaction.id,
+        },
+    )
+
+    db.commit()
+
+    db.refresh(account)
+    db.refresh(funding)
+    db.refresh(rule)
+    db.refresh(transaction)
+
+    return {
+        "ok": True,
+        "triggered": True,
+        "reason": "TOPUP_COMPLETED",
+        "message": "Demo automatic top-up completed.",
+        "amount": str(amount),
+        "currency": account.currency,
+        "ad_balance_before": str(ad_before),
+        "ad_balance_after": str(ad_after),
+        "funding_balance_before": str(funding_before),
+        "funding_balance_after": str(funding_after),
+        "transaction_id": transaction.id,
+        "last_triggered_at": rule.last_triggered_at,
     }

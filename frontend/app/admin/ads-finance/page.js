@@ -50,6 +50,8 @@ export default function AdsFinancePage() {
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [saving, setSaving] = useState(false)
+  const [autoCheckingId, setAutoCheckingId] = useState('')
+  const [autoResult, setAutoResult] = useState(null)
 
   const query = () => {
     const p = new URLSearchParams()
@@ -367,6 +369,45 @@ export default function AdsFinancePage() {
         )
     )
 
+  const runDemoAutoCheck = async account => {
+    setAutoCheckingId(account.id)
+    setError('')
+    setAutoResult(null)
+
+    try {
+      const result = await api(
+        `/ads-finance/accounts/${account.id}/demo-auto-check`,
+        {
+          method: 'POST'
+        }
+      )
+
+      setAutoResult({
+        account_name: account.name,
+        ...result
+      })
+
+      if (result.triggered) {
+        flash(
+          `Demo auto top-up completed: ${result.ad_balance_before} → ${result.ad_balance_after} ${result.currency}.`
+        )
+      } else {
+        flash(
+          result.message ||
+          `Auto check finished: ${result.reason || 'NO_ACTION'}`
+        )
+      }
+
+      await load()
+
+    } catch (e) {
+      setError(e.message)
+
+    } finally {
+      setAutoCheckingId('')
+    }
+  }
+
   const openDemoTopup = account => {
     setTopupAccount(account)
 
@@ -591,6 +632,79 @@ export default function AdsFinancePage() {
           </strong>
         </div>
       </div>
+
+      {autoResult && (
+        <div
+          className={
+            autoResult.triggered
+              ? 'af-auto-result success'
+              : 'af-auto-result'
+          }
+        >
+          <div>
+            <strong>
+              Demo Auto Check
+            </strong>
+
+            <span>
+              {autoResult.account_name}
+            </span>
+          </div>
+
+          <div>
+            <strong>
+              {autoResult.triggered
+                ? 'TOP-UP COMPLETED'
+                : autoResult.reason || 'NO ACTION'}
+            </strong>
+
+            <span>
+              {autoResult.message || 'Check completed.'}
+            </span>
+          </div>
+
+          {autoResult.triggered && (
+            <>
+              <div>
+                <strong>
+                  Ad Account
+                </strong>
+
+                <span>
+                  {autoResult.ad_balance_before}
+                  {' → '}
+                  {autoResult.ad_balance_after}
+                  {' '}
+                  {autoResult.currency}
+                </span>
+              </div>
+
+              <div>
+                <strong>
+                  Funding Wallet
+                </strong>
+
+                <span>
+                  {autoResult.funding_balance_before}
+                  {' → '}
+                  {autoResult.funding_balance_after}
+                  {' '}
+                  {autoResult.currency}
+                </span>
+              </div>
+            </>
+          )}
+
+          <button
+            className="btn small secondary"
+            onClick={() =>
+              setAutoResult(null)
+            }
+          >
+            Close
+          </button>
+        </div>
+      )}
 
       <div className="panel af-panel">
         <div className="panel-head">
@@ -820,6 +934,26 @@ export default function AdsFinancePage() {
                             }
                           >
                             Demo Top Up
+                          </button>
+
+                          <button
+                            className="btn small secondary"
+                            disabled={
+                              !account.funding_source ||
+                              autoCheckingId === account.id
+                            }
+                            title={
+                              account.funding_source
+                                ? 'Evaluate demo automatic funding rule'
+                                : 'Select a funding source first'
+                            }
+                            onClick={() =>
+                              runDemoAutoCheck(account)
+                            }
+                          >
+                            {autoCheckingId === account.id
+                              ? 'Checking...'
+                              : 'Run Auto Check'}
                           </button>
 
                           <button

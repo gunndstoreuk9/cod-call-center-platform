@@ -3357,3 +3357,52 @@ html[dir="rtl"] .profit-hero>div>span{letter-spacing:0}
     grid-template-columns:1fr;
   }
 }
+
+/* DEMO AUTO RULE RESULT */
+
+.af-auto-result{
+  display:flex;
+  align-items:center;
+  gap:24px;
+  padding:14px 16px;
+  margin:14px 0;
+  border:1px solid #f0cf95;
+  border-radius:11px;
+  background:#fff9ef;
+}
+
+.af-auto-result.success{
+  border-color:#b9dfca;
+  background:#f1fbf5;
+}
+
+.af-auto-result>div{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}
+
+.af-auto-result strong{
+  color:#20364d;
+  font-size:10px;
+}
+
+.af-auto-result span{
+  color:#718398;
+  font-size:10px;
+}
+
+.af-auto-result button{
+  margin-left:auto;
+}
+
+@media(max-width:800px){
+  .af-auto-result{
+    align-items:stretch;
+    flex-direction:column;
+  }
+
+  .af-auto-result button{
+    margin-left:0;
+  }
+}
