@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import base64
 import hashlib
 import hmac
@@ -1504,6 +1506,18 @@ def list_imported_tiktok_accounts(
                     account.current_balance
                 ),
 
+            "spend_today":
+                str(
+                    (account.provider_payload or {})
+                    .get("spend_today", "0")
+                ),
+
+            "demo":
+                bool(
+                    (account.provider_payload or {})
+                    .get("demo", False)
+                ),
+
             "status":
                 account.status,
 
@@ -1535,4 +1549,146 @@ def tiktok_setup_info(
 ):
     return {
         "callback_url": _tiktok_callback_url(),
+    }
+
+
+
+@router.post(
+    "/{connection_id}/tiktok/demo-sync"
+)
+def sync_tiktok_demo_account(
+    connection_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+        )
+    ),
+):
+    row = connection_or_404(
+        db,
+        connection_id,
+    )
+
+    if row.provider != "TIKTOK_ADS":
+        raise HTTPException(
+            400,
+            "Connection is not TikTok Ads",
+        )
+
+    config = dict(row.config or {})
+
+    if config.get("mode") != "DEMO":
+        raise HTTPException(
+            400,
+            "This connection is not in demo mode",
+        )
+
+    external_id = (
+        f"DEMO-{row.id[:12]}"
+    )
+
+    account = (
+        db.query(AdAccount)
+        .filter(
+            AdAccount.provider == "TIKTOK_ADS",
+            AdAccount.external_account_id == external_id,
+        )
+        .first()
+    )
+
+    if not account:
+        account = AdAccount(
+            provider="TIKTOK_ADS",
+            external_account_id=external_id,
+            integration_id=row.id,
+            store_id=row.store_id,
+            name="TikTok Demo Account",
+            currency="USD",
+            current_balance=Decimal("25.00"),
+            status="ACTIVE",
+            is_active=True,
+        )
+
+        db.add(account)
+
+    account.integration_id = row.id
+    account.store_id = row.store_id
+    account.name = "TikTok Demo Account"
+    account.currency = "USD"
+    account.current_balance = Decimal("25.00")
+    account.status = "ACTIVE"
+    account.is_active = True
+
+    account.external_business_id = (
+        "DEMO-BUSINESS-CENTER"
+    )
+
+    account.provider_payload = {
+        "demo": True,
+        "spend_today": "8.00",
+        "timezone": "Africa/Casablanca",
+    }
+
+    account.balance_synced_at = utcnow()
+    account.spend_synced_at = utcnow()
+    account.last_error = None
+
+    sync = AdSyncRun(
+        integration_id=row.id,
+        provider="TIKTOK_ADS",
+        sync_type="DEMO_SYNC",
+        status="SUCCESS",
+        accounts_scanned=1,
+        accounts_updated=1,
+        started_at=utcnow(),
+        finished_at=utcnow(),
+        created_at=utcnow(),
+    )
+
+    db.add(sync)
+
+    row.last_test_status = "SUCCESS"
+    row.last_test_message = (
+        "Demo TikTok account synced successfully."
+    )
+    row.last_test_at = utcnow()
+    row.is_active = True
+
+    db.flush()
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="TIKTOK_DEMO_ACCOUNT_SYNCED",
+        entity_type="INTEGRATION",
+        entity_id=row.id,
+        after={
+            "demo": True,
+            "advertiser_id": external_id,
+            "balance": "25.00",
+            "spend_today": "8.00",
+        },
+    )
+
+    db.commit()
+    db.refresh(account)
+
+    return {
+        "ok": True,
+        "account": {
+            "id": account.id,
+            "advertiser_id":
+                account.external_account_id,
+            "name": account.name,
+            "currency": account.currency,
+            "balance":
+                str(account.current_balance),
+            "spend_today": "8.00",
+            "status": account.status,
+            "business_center_id":
+                account.external_business_id,
+            "demo": True,
+        },
     }

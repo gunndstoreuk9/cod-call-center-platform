@@ -7,6 +7,7 @@ import Modal from '../../../components/Modal'
 const emptyForm = {
   name: 'TikTok Ads',
   store_id: '',
+  mode: 'DEMO',
   app_id: '',
   app_secret: ''
 }
@@ -114,6 +115,7 @@ export default function ConnectionsPage() {
     setForm({
       name: row.name || 'TikTok Ads',
       store_id: row.store_id || '',
+      mode: config.mode || 'LIVE',
       app_id: config.app_id || '',
       app_secret: ''
     })
@@ -128,19 +130,47 @@ export default function ConnectionsPage() {
     setError('')
 
     try {
-      if (editing) {
-        const body = {
-          name: form.name,
-          store_id: form.store_id || null,
-          config: {
-            app_id: form.app_id
-          }
+      const mode = form.mode || 'DEMO'
+
+      const config = {
+        mode
+      }
+
+      const secrets = {}
+
+      if (mode === 'LIVE') {
+        if (!form.app_id) {
+          throw new Error(
+            'TikTok App ID is required for Live mode.'
+          )
+        }
+
+        config.app_id = form.app_id
+
+        if (!editing && !form.app_secret) {
+          throw new Error(
+            'TikTok App Secret is required for Live mode.'
+          )
         }
 
         if (form.app_secret) {
-          body.secrets = {
-            app_secret: form.app_secret
-          }
+          secrets.app_secret =
+            form.app_secret
+        }
+      }
+
+      if (editing) {
+        const body = {
+          name: form.name,
+          store_id:
+            form.store_id || null,
+          config
+        }
+
+        if (
+          Object.keys(secrets).length
+        ) {
+          body.secrets = secrets
         }
 
         await api(
@@ -152,25 +182,26 @@ export default function ConnectionsPage() {
         )
 
         flash('Connection updated.')
+
       } else {
         await api('/connections', {
           method: 'POST',
+
           body: {
             provider: 'TIKTOK_ADS',
             name: form.name,
-            store_id: form.store_id || null,
-
-            config: {
-              app_id: form.app_id
-            },
-
-            secrets: {
-              app_secret: form.app_secret
-            }
+            store_id:
+              form.store_id || null,
+            config,
+            secrets
           }
         })
 
-        flash('TikTok connection created.')
+        flash(
+          mode === 'DEMO'
+            ? 'TikTok demo connection created.'
+            : 'TikTok connection created.'
+        )
       }
 
       setFormOpen(false)
@@ -178,8 +209,10 @@ export default function ConnectionsPage() {
       setForm(emptyForm)
 
       await load()
+
     } catch (e2) {
       setError(e2.message)
+
     } finally {
       setSaving(false)
     }
@@ -240,6 +273,39 @@ export default function ConnectionsPage() {
     setError(
       'Authorization is still pending. Refresh the page after completing TikTok authorization.'
     )
+  }
+
+  const syncDemo = async row => {
+    setError('')
+    setConnectingId(row.id)
+
+    try {
+      const result = await api(
+        `/connections/${row.id}/tiktok/demo-sync`,
+        {
+          method: 'POST'
+        }
+      )
+
+      flash(
+        'Demo TikTok account synced.'
+      )
+
+      await load()
+
+      const imported = await api(
+        `/connections/${row.id}/tiktok/imported-accounts`
+      )
+
+      setAccounts(imported || [])
+      setAccountsOpen(true)
+
+    } catch (e) {
+      setError(e.message)
+
+    } finally {
+      setConnectingId(null)
+    }
   }
 
   const connectTikTok = async row => {
@@ -519,9 +585,20 @@ export default function ConnectionsPage() {
                   </div>
 
                   <div>
+                    <span>Mode</span>
+                    <strong>
+                      {row.config?.mode === 'DEMO'
+                        ? 'Test / Demo'
+                        : 'Live TikTok'}
+                    </strong>
+                  </div>
+
+                  <div>
                     <span>App ID</span>
                     <strong>
-                      {row.config?.app_id || '—'}
+                      {row.config?.mode === 'DEMO'
+                        ? 'Not required'
+                        : row.config?.app_id || '—'}
                     </strong>
                   </div>
 
@@ -565,14 +642,18 @@ export default function ConnectionsPage() {
                         connectingId === row.id
                       }
                       onClick={() =>
-                        connectTikTok(row)
+                        row.config?.mode === 'DEMO'
+                          ? syncDemo(row)
+                          : connectTikTok(row)
                       }
                     >
                       {connectingId === row.id
-                        ? 'Connecting...'
-                        : row.status === 'CONNECTED'
-                          ? 'Reconnect TikTok'
-                          : 'Connect TikTok'}
+                        ? 'Working...'
+                        : row.config?.mode === 'DEMO'
+                          ? 'Sync Demo Account'
+                          : row.status === 'CONNECTED'
+                            ? 'Reconnect TikTok'
+                            : 'Connect TikTok'}
                     </button>
                   ) : (
                     <button
@@ -587,6 +668,7 @@ export default function ConnectionsPage() {
 
                   {row.status === 'CONNECTED' && (
                     <>
+                      {row.config?.mode !== 'DEMO' && (
                       <button
                         className="btn small"
                         disabled={
@@ -600,6 +682,7 @@ export default function ConnectionsPage() {
                           ? 'Syncing...'
                           : 'Import / Sync Accounts'}
                       </button>
+                      )}
 
                       <button
                         className="btn small secondary"
@@ -819,11 +902,41 @@ export default function ConnectionsPage() {
 
           <div className="field">
             <label>
+              Connection Mode
+            </label>
+
+            <select
+              value={form.mode}
+              onChange={e =>
+                setForm({
+                  ...form,
+                  mode: e.target.value
+                })
+              }
+            >
+              <option value="DEMO">
+                Test / Demo — No TikTok account required
+              </option>
+
+              <option value="LIVE">
+                Live TikTok
+              </option>
+            </select>
+
+            <small>
+              Demo mode never connects to TikTok
+              and never moves real money.
+            </small>
+          </div>
+
+          <div className="field">
+            <label>
               TikTok App ID
             </label>
 
             <input
-              required
+              required={form.mode === 'LIVE'}
+              disabled={form.mode === 'DEMO'}
               value={form.app_id}
               onChange={e =>
                 setForm({
@@ -841,7 +954,11 @@ export default function ConnectionsPage() {
             </label>
 
             <input
-              required={!editing}
+              required={
+                form.mode === 'LIVE' &&
+                !editing
+              }
+              disabled={form.mode === 'DEMO'}
               type="password"
               autoComplete="new-password"
               value={form.app_secret}
