@@ -51,6 +51,7 @@ export default function AdsFinancePage() {
   const [success, setSuccess] = useState('')
   const [saving, setSaving] = useState(false)
   const [autoCheckingId, setAutoCheckingId] = useState('')
+  const [schedulerUpdatingId, setSchedulerUpdatingId] = useState('')
   const [autoResult, setAutoResult] = useState(null)
 
   const query = () => {
@@ -368,6 +369,40 @@ export default function AdsFinancePage() {
             account.connection.id
         )
     )
+
+  const toggleDemoScheduler = async account => {
+    setSchedulerUpdatingId(account.id)
+    setError('')
+
+    try {
+      const enabled =
+        !account.demo_scheduler_enabled
+
+      await api(
+        `/ads-finance/accounts/${account.id}/demo-scheduler`,
+        {
+          method: 'POST',
+          body: {
+            enabled
+          }
+        }
+      )
+
+      flash(
+        enabled
+          ? 'Demo scheduler enabled. Background checks will run automatically.'
+          : 'Demo scheduler disabled.'
+      )
+
+      await load()
+
+    } catch (e) {
+      setError(e.message)
+
+    } finally {
+      setSchedulerUpdatingId('')
+    }
+  }
 
   const runDemoAutoCheck = async account => {
     setAutoCheckingId(account.id)
@@ -880,8 +915,22 @@ export default function AdsFinancePage() {
                         </small>
 
                         <span>
-                          AUTO OFF
+                          REAL AUTO OFF
                         </span>
+
+                            {account.demo && (
+                              <span
+                                className={
+                                  account.demo_scheduler_enabled
+                                    ? 'af-demo-scheduler-badge on'
+                                    : 'af-demo-scheduler-badge'
+                                }
+                              >
+                                {account.demo_scheduler_enabled
+                                  ? 'DEMO SCHEDULER ON'
+                                  : 'DEMO SCHEDULER OFF'}
+                              </span>
+                            )}
                       </div>
                     ) : (
                       <span className="muted">
@@ -954,6 +1003,32 @@ export default function AdsFinancePage() {
                             {autoCheckingId === account.id
                               ? 'Checking...'
                               : 'Run Auto Check'}
+                          </button>
+
+                          <button
+                            className={
+                              account.demo_scheduler_enabled
+                                ? 'btn small af-scheduler-on'
+                                : 'btn small secondary'
+                            }
+                            disabled={
+                              !account.funding_source ||
+                              schedulerUpdatingId === account.id
+                            }
+                            title={
+                              account.funding_source
+                                ? 'Enable or disable demo background checks'
+                                : 'Select a funding source first'
+                            }
+                            onClick={() =>
+                              toggleDemoScheduler(account)
+                            }
+                          >
+                            {schedulerUpdatingId === account.id
+                              ? 'Updating...'
+                              : account.demo_scheduler_enabled
+                                ? 'Scheduler ON'
+                                : 'Scheduler OFF'}
                           </button>
 
                           <button

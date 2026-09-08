@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     session_hours: int = 12
     cookie_secure: bool = False
     timezone: str = "Africa/Casablanca"
+    demo_auto_scheduler_interval_seconds: int = 300
     admin_username: str = "owner"
     admin_password: str = "ChangeMeNow!123"
     admin_display_name: str = "Owner"

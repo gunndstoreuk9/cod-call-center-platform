@@ -3406,3 +3406,33 @@ html[dir="rtl"] .profit-hero>div>span{letter-spacing:0}
     margin-left:0;
   }
 }
+
+/* DEMO AUTO FUNDING SCHEDULER */
+
+.af-scheduler-on{
+  background:#148451;
+  border-color:#148451;
+  color:#fff;
+}
+
+.af-scheduler-on:hover{
+  background:#106d43;
+  border-color:#106d43;
+}
+
+.af-demo-scheduler-badge{
+  display:inline-flex;
+  margin-top:4px;
+  padding:3px 6px;
+  border-radius:6px;
+  background:#eef2f6;
+  color:#78889a;
+  font-size:8px;
+  font-weight:800;
+  letter-spacing:.03em;
+}
+
+.af-demo-scheduler-badge.on{
+  background:#e6f7ee;
+  color:#13784b;
+}
