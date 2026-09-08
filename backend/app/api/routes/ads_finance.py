@@ -15,6 +15,7 @@ from app.models import (
     AdAccount,
     AdAccountProductMap,
     AdFinanceTransaction,
+    AdFundingAccount,
     AdTopupRule,
     IntegrationConfig,
     Product,
@@ -60,6 +61,31 @@ class TopupRuleRequest(BaseModel):
         ge=5,
         le=1440,
     )
+
+
+class DemoFundingWalletRequest(BaseModel):
+    name: str = Field(
+        default="Demo Funding Wallet",
+        min_length=1,
+        max_length=180,
+    )
+
+    starting_balance: Decimal = Field(
+        default=Decimal("1000"),
+        ge=0,
+        le=Decimal("10000000"),
+    )
+
+
+class DemoFundingBalanceRequest(BaseModel):
+    balance: Decimal = Field(
+        ge=0,
+        le=Decimal("10000000"),
+    )
+
+
+class FundingSourceRequest(BaseModel):
+    funding_account_id: str | None = None
 
 
 class DemoTopupRequest(BaseModel):
@@ -114,6 +140,91 @@ def account_or_404(
     return row
 
 
+def funding_or_404(
+    db: Session,
+    funding_account_id: str,
+) -> AdFundingAccount:
+
+    row = (
+        db.query(AdFundingAccount)
+        .filter(
+            AdFundingAccount.id
+            == funding_account_id
+        )
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(
+            404,
+            "Funding account not found",
+        )
+
+    return row
+
+
+def funding_out(
+    row: AdFundingAccount,
+) -> dict:
+
+    payload = dict(
+        row.provider_payload or {}
+    )
+
+    return {
+        "id":
+            row.id,
+
+        "integration_id":
+            row.integration_id,
+
+        "provider":
+            row.provider,
+
+        "external_account_id":
+            row.external_account_id,
+
+        "name":
+            row.name,
+
+        "account_type":
+            row.account_type,
+
+        "currency":
+            row.currency,
+
+        "balance":
+            str(
+                money(
+                    row.current_balance
+                )
+            ),
+
+        "status":
+            row.status,
+
+        "is_active":
+            row.is_active,
+
+        "demo":
+            bool(
+                payload.get("demo")
+            ),
+
+        "balance_synced_at":
+            row.balance_synced_at,
+
+        "last_error":
+            row.last_error,
+
+        "created_at":
+            row.created_at,
+
+        "updated_at":
+            row.updated_at,
+    }
+
+
 def active_product_map(
     db: Session,
     account_id: str,
@@ -162,6 +273,9 @@ def rule_out(
     return {
         "id":
             row.id,
+
+        "funding_account_id":
+            row.funding_account_id,
 
         "threshold_balance":
             str(row.threshold_balance),
@@ -250,6 +364,21 @@ def account_out(
         db,
         row.id,
     )
+
+    funding_source = None
+
+    if (
+        rule
+        and rule.funding_account_id
+    ):
+        funding_source = (
+            db.query(AdFundingAccount)
+            .filter(
+                AdFundingAccount.id
+                == rule.funding_account_id
+            )
+            .first()
+        )
 
     payload = dict(
         row.provider_payload or {}
@@ -380,6 +509,15 @@ def account_out(
 
         "rule":
             rule_out(rule),
+
+        "funding_source":
+            (
+                funding_out(
+                    funding_source
+                )
+                if funding_source
+                else None
+            ),
     }
 
 
@@ -992,6 +1130,399 @@ def update_demo_metrics(
     )
 
 
+
+
+
+@router.get("/funding-accounts")
+def list_funding_accounts(
+    integration_id: str | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+            "SUPERVISOR",
+        )
+    ),
+):
+    q = db.query(
+        AdFundingAccount
+    )
+
+    if integration_id:
+        q = q.filter(
+            AdFundingAccount.integration_id
+            == integration_id
+        )
+
+    rows = (
+        q.order_by(
+            AdFundingAccount.created_at.desc()
+        )
+        .all()
+    )
+
+    return [
+        funding_out(row)
+        for row in rows
+    ]
+
+
+@router.post(
+    "/accounts/{account_id}/demo-funding-wallet"
+)
+def create_demo_funding_wallet(
+    account_id: str,
+    payload: DemoFundingWalletRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+        )
+    ),
+):
+    account = account_or_404(
+        db,
+        account_id,
+    )
+
+    account_payload = dict(
+        account.provider_payload or {}
+    )
+
+    if not account_payload.get("demo"):
+        raise HTTPException(
+            400,
+            "Demo funding wallet can only be created for demo ad accounts",
+        )
+
+    shared_key = (
+        account.integration_id
+        or account.id
+    )
+
+    external_id = (
+        "DEMO-FUNDING-"
+        + shared_key
+    )
+
+    funding = (
+        db.query(AdFundingAccount)
+        .filter(
+            AdFundingAccount.provider
+            == "CODOPS_DEMO",
+
+            AdFundingAccount.external_account_id
+            == external_id,
+        )
+        .first()
+    )
+
+    created = False
+
+    if not funding:
+        funding = AdFundingAccount(
+            integration_id=
+                account.integration_id,
+
+            provider=
+                "CODOPS_DEMO",
+
+            external_account_id=
+                external_id,
+
+            name=
+                payload.name.strip(),
+
+            account_type=
+                "DEMO_WALLET",
+
+            currency=
+                account.currency,
+
+            current_balance=
+                payload.starting_balance,
+
+            status=
+                "ACTIVE",
+
+            is_active=True,
+
+            provider_payload={
+                "demo": True,
+                "kind":
+                    "FUNDING_WALLET",
+            },
+
+            balance_synced_at=
+                utcnow(),
+
+            created_at=
+                utcnow(),
+
+            updated_at=
+                utcnow(),
+        )
+
+        db.add(funding)
+        db.flush()
+
+        created = True
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="DEMO_FUNDING_WALLET_CREATED",
+        entity_type="AD_FUNDING_ACCOUNT",
+        entity_id=funding.id,
+        after={
+            "created":
+                created,
+
+            "name":
+                funding.name,
+
+            "currency":
+                funding.currency,
+
+            "balance":
+                str(
+                    funding.current_balance
+                ),
+        },
+    )
+
+    db.commit()
+    db.refresh(funding)
+
+    return {
+        "ok": True,
+        "created": created,
+        "funding_account":
+            funding_out(funding),
+    }
+
+
+@router.post(
+    "/funding-accounts/{funding_account_id}/demo-balance"
+)
+def update_demo_funding_balance(
+    funding_account_id: str,
+    payload: DemoFundingBalanceRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+        )
+    ),
+):
+    funding = funding_or_404(
+        db,
+        funding_account_id,
+    )
+
+    provider_payload = dict(
+        funding.provider_payload or {}
+    )
+
+    if not provider_payload.get("demo"):
+        raise HTTPException(
+            400,
+            "Only demo funding accounts can be simulated",
+        )
+
+    before = money(
+        funding.current_balance
+    )
+
+    funding.current_balance = (
+        payload.balance
+    )
+
+    funding.balance_synced_at = (
+        utcnow()
+    )
+
+    funding.updated_at = (
+        utcnow()
+    )
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="DEMO_FUNDING_BALANCE_UPDATED",
+        entity_type="AD_FUNDING_ACCOUNT",
+        entity_id=funding.id,
+        before={
+            "balance":
+                str(before),
+        },
+        after={
+            "balance":
+                str(payload.balance),
+        },
+    )
+
+    db.commit()
+    db.refresh(funding)
+
+    return funding_out(funding)
+
+
+@router.put(
+    "/accounts/{account_id}/funding-source"
+)
+def map_funding_source(
+    account_id: str,
+    payload: FundingSourceRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+        )
+    ),
+):
+    account = account_or_404(
+        db,
+        account_id,
+    )
+
+    funding = None
+
+    if payload.funding_account_id:
+        funding = funding_or_404(
+            db,
+            payload.funding_account_id,
+        )
+
+        if not funding.is_active:
+            raise HTTPException(
+                400,
+                "Funding account is disabled",
+            )
+
+        if (
+            funding.currency
+            != account.currency
+        ):
+            raise HTTPException(
+                400,
+                "Funding account currency must match ad account currency",
+            )
+
+        if (
+            funding.integration_id
+            and account.integration_id
+            and funding.integration_id
+            != account.integration_id
+        ):
+            raise HTTPException(
+                400,
+                "Funding source belongs to another connection",
+            )
+
+    rule = account_rule(
+        db,
+        account.id,
+    )
+
+    before_source = (
+        rule.funding_account_id
+        if rule
+        else None
+    )
+
+    if not rule:
+        rule = AdTopupRule(
+            ad_account_id=
+                account.id,
+
+            funding_account_id=
+                (
+                    funding.id
+                    if funding
+                    else None
+                ),
+
+            threshold_balance=
+                Decimal("10"),
+
+            refill_amount=
+                Decimal("20"),
+
+            daily_cap=
+                Decimal("100"),
+
+            monthly_cap=
+                Decimal("2000"),
+
+            cooldown_minutes=30,
+
+            auto_enabled=False,
+
+            created_by_user_id=
+                user.id,
+
+            updated_by_user_id=
+                user.id,
+
+            created_at=
+                utcnow(),
+
+            updated_at=
+                utcnow(),
+        )
+
+        db.add(rule)
+
+    else:
+        rule.funding_account_id = (
+            funding.id
+            if funding
+            else None
+        )
+
+        rule.auto_enabled = False
+
+        rule.updated_by_user_id = (
+            user.id
+        )
+
+        rule.updated_at = (
+            utcnow()
+        )
+
+    log_action(
+        db,
+        user_id=user.id,
+        action="AD_FUNDING_SOURCE_MAPPED",
+        entity_type="AD_ACCOUNT",
+        entity_id=account.id,
+        before={
+            "funding_account_id":
+                before_source,
+        },
+        after={
+            "funding_account_id":
+                (
+                    funding.id
+                    if funding
+                    else None
+                ),
+        },
+    )
+
+    db.commit()
+
+    return account_out(
+        db,
+        account,
+    )
+
+
 @router.get("/transactions")
 def list_ad_finance_transactions(
     account_id: str | None = None,
@@ -1115,12 +1646,75 @@ def demo_manual_topup(
             "Demo top-up is only available for demo accounts",
         )
 
+    rule = account_rule(
+        db,
+        account.id,
+    )
+
+    if (
+        not rule
+        or not rule.funding_account_id
+    ):
+        raise HTTPException(
+            400,
+            "Select a funding source before topping up",
+        )
+
+    funding = funding_or_404(
+        db,
+        rule.funding_account_id,
+    )
+
+    funding_payload = dict(
+        funding.provider_payload
+        or {}
+    )
+
+    if not funding_payload.get("demo"):
+        raise HTTPException(
+            400,
+            "Demo top-up requires a demo funding source",
+        )
+
+    if not funding.is_active:
+        raise HTTPException(
+            400,
+            "Funding source is disabled",
+        )
+
+    if funding.status != "ACTIVE":
+        raise HTTPException(
+            400,
+            "Funding source is not active",
+        )
+
+    if funding.currency != account.currency:
+        raise HTTPException(
+            400,
+            "Funding source currency does not match ad account currency",
+        )
+
     before = money(
         account.current_balance
     )
 
     amount = money(
         payload.amount
+    )
+
+    funding_before = money(
+        funding.current_balance
+    )
+
+    if funding_before < amount:
+        raise HTTPException(
+            400,
+            "Insufficient funding wallet balance",
+        )
+
+    funding_after = (
+        funding_before
+        - amount
     )
 
     after = before + amount
@@ -1132,7 +1726,8 @@ def demo_manual_topup(
         ad_account_id=
             account.id,
 
-        funding_account_id=None,
+        funding_account_id=
+            funding.id,
 
         provider=
             account.provider,
@@ -1163,8 +1758,11 @@ def demo_manual_topup(
             + uuid.uuid4().hex[:16]
         ),
 
-        provider_reference=
-            "CODOPS DEMO TOP-UP",
+        provider_reference=(
+            f"{funding.name} | "
+            f"{funding_before} -> "
+            f"{funding_after}"
+        ),
 
         status="SUCCESS",
 
@@ -1192,6 +1790,18 @@ def demo_manual_topup(
         utcnow()
     )
 
+    funding.current_balance = (
+        funding_after
+    )
+
+    funding.balance_synced_at = (
+        utcnow()
+    )
+
+    funding.updated_at = (
+        utcnow()
+    )
+
     db.add(transaction)
 
     log_action(
@@ -1201,15 +1811,28 @@ def demo_manual_topup(
         entity_type="AD_ACCOUNT",
         entity_id=account.id,
         before={
-            "balance":
+            "ad_balance":
                 str(before),
+
+            "funding_balance":
+                str(
+                    funding_before
+                ),
         },
         after={
             "amount":
                 str(amount),
 
-            "balance":
+            "ad_balance":
                 str(after),
+
+            "funding_balance":
+                str(
+                    funding_after
+                ),
+
+            "funding_account_id":
+                funding.id,
 
             "transaction_id":
                 transaction.id,
@@ -1251,6 +1874,22 @@ def demo_manual_topup(
 
             "status":
                 transaction.status,
+
+            "funding_account_id":
+                funding.id,
+
+            "funding_account_name":
+                funding.name,
+
+            "funding_balance_before":
+                str(
+                    funding_before
+                ),
+
+            "funding_balance_after":
+                str(
+                    funding_after
+                ),
 
             "created_at":
                 transaction.created_at,

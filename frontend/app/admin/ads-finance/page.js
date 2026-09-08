@@ -25,6 +25,14 @@ export default function AdsFinancePage() {
   const [stores, setStores] = useState([])
   const [products, setProducts] = useState([])
   const [transactions, setTransactions] = useState([])
+  const [fundingAccounts, setFundingAccounts] = useState([])
+
+  const [walletAccount, setWalletAccount] = useState(null)
+  const [walletName, setWalletName] = useState('Demo Funding Wallet')
+  const [walletStartingBalance, setWalletStartingBalance] = useState('1000')
+
+  const [fundingSimulator, setFundingSimulator] = useState(null)
+  const [fundingSimBalance, setFundingSimBalance] = useState('1000')
 
   const [storeId, setStoreId] = useState('')
   const [productId, setProductId] = useState('')
@@ -56,17 +64,19 @@ export default function AdsFinancePage() {
 
   const load = async () => {
     try {
-      const [dashboard, s, p, tx] = await Promise.all([
+      const [dashboard, s, p, tx, funding] = await Promise.all([
         api(`/ads-finance/dashboard${query()}`),
         api('/stores'),
         api('/products'),
-        api('/ads-finance/transactions?limit=20')
+        api('/ads-finance/transactions?limit=20'),
+        api('/ads-finance/funding-accounts')
       ])
 
       setData(dashboard || {})
       setStores(s || [])
       setProducts(p || [])
       setTransactions(tx || [])
+      setFundingAccounts(funding || [])
       setError('')
     } catch (e) {
       setError(e.message)
@@ -84,6 +94,32 @@ export default function AdsFinancePage() {
       setSuccess('')
     }, 3500)
   }
+
+  const fundingCurrencyTotals = useMemo(() => {
+    const totals = {}
+
+    fundingAccounts
+      .filter(x => x.is_active)
+      .forEach(account => {
+        const currency = account.currency || 'USD'
+
+        totals[currency] =
+          (totals[currency] || 0) +
+          Number(account.balance || 0)
+      })
+
+    return Object.entries(totals).map(
+      ([currency, balance]) => ({
+        currency,
+        balance
+      })
+    )
+  }, [fundingAccounts])
+
+  const selectedFundingCurrency =
+    fundingCurrencyTotals.length === 1
+      ? fundingCurrencyTotals[0]
+      : null
 
   const selectedCurrency =
     data.currency_totals?.length === 1
@@ -190,6 +226,146 @@ export default function AdsFinancePage() {
       setSaving(false)
     }
   }
+
+  const openCreateWallet = account => {
+    setWalletAccount(account)
+    setWalletName('Demo Funding Wallet')
+    setWalletStartingBalance('1000')
+  }
+
+  const createDemoWallet = async e => {
+    e.preventDefault()
+
+    if (!walletAccount) return
+
+    setSaving(true)
+    setError('')
+
+    try {
+      const result = await api(
+        `/ads-finance/accounts/${walletAccount.id}/demo-funding-wallet`,
+        {
+          method: 'POST',
+          body: {
+            name: walletName,
+            starting_balance:
+              Number(walletStartingBalance || 0)
+          }
+        }
+      )
+
+      const funding =
+        result.funding_account
+
+      if (funding?.id) {
+        await api(
+          `/ads-finance/accounts/${walletAccount.id}/funding-source`,
+          {
+            method: 'PUT',
+            body: {
+              funding_account_id:
+                funding.id
+            }
+          }
+        )
+      }
+
+      setWalletAccount(null)
+
+      flash(
+        result.created
+          ? 'Demo funding wallet created and connected.'
+          : 'Existing demo funding wallet connected.'
+      )
+
+      await load()
+
+    } catch (e2) {
+      setError(e2.message)
+
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const setFundingSource = async (
+    account,
+    fundingAccountId
+  ) => {
+    setError('')
+
+    try {
+      await api(
+        `/ads-finance/accounts/${account.id}/funding-source`,
+        {
+          method: 'PUT',
+          body: {
+            funding_account_id:
+              fundingAccountId || null
+          }
+        }
+      )
+
+      flash('Funding source updated.')
+      await load()
+
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  const openFundingSimulator = funding => {
+    setFundingSimulator(funding)
+    setFundingSimBalance(
+      funding.balance || '1000'
+    )
+  }
+
+  const saveFundingSimulator = async e => {
+    e.preventDefault()
+
+    if (!fundingSimulator) return
+
+    setSaving(true)
+    setError('')
+
+    try {
+      await api(
+        `/ads-finance/funding-accounts/${fundingSimulator.id}/demo-balance`,
+        {
+          method: 'POST',
+          body: {
+            balance:
+              Number(fundingSimBalance || 0)
+          }
+        }
+      )
+
+      setFundingSimulator(null)
+      flash('Demo funding wallet balance updated.')
+
+      await load()
+
+    } catch (e2) {
+      setError(e2.message)
+
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const fundingOptionsForAccount = account =>
+    fundingAccounts.filter(
+      funding =>
+        funding.is_active &&
+        funding.currency === account.currency &&
+        (
+          !funding.integration_id ||
+          !account.connection?.id ||
+          funding.integration_id ===
+            account.connection.id
+        )
+    )
 
   const openDemoTopup = account => {
     setTopupAccount(account)
@@ -377,6 +553,19 @@ export default function AdsFinancePage() {
         </div>
 
         <div>
+          <span>Funding Available</span>
+          <strong>
+            {selectedFundingCurrency
+              ? `${Number(
+                  selectedFundingCurrency.balance
+                ).toLocaleString()} ${selectedFundingCurrency.currency}`
+              : fundingCurrencyTotals.length
+                ? 'Multiple'
+                : '0'}
+          </strong>
+        </div>
+
+        <div>
           <span>Active Accounts</span>
           <strong>
             {data.active_accounts || 0}
@@ -421,6 +610,7 @@ export default function AdsFinancePage() {
                 <th>Balance</th>
                 <th>Spend Today</th>
                 <th>Product</th>
+                <th>Funding Source</th>
                 <th>Funding Rule</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -501,6 +691,66 @@ export default function AdsFinancePage() {
                   </td>
 
                   <td>
+                    <div className="af-funding-source">
+                      <select
+                        value={
+                          account.funding_source?.id || ''
+                        }
+                        onChange={e =>
+                          setFundingSource(
+                            account,
+                            e.target.value
+                          )
+                        }
+                      >
+                        <option value="">
+                          No funding source
+                        </option>
+
+                        {fundingOptionsForAccount(account)
+                          .map(funding => (
+                            <option
+                              key={funding.id}
+                              value={funding.id}
+                            >
+                              {funding.name}
+                              {' · '}
+                              {Number(
+                                funding.balance || 0
+                              ).toLocaleString()}
+                              {' '}
+                              {funding.currency}
+                            </option>
+                          ))}
+                      </select>
+
+                      {account.demo &&
+                        !fundingOptionsForAccount(account).length && (
+                          <button
+                            className="btn small secondary"
+                            onClick={() =>
+                              openCreateWallet(account)
+                            }
+                          >
+                            + Create Demo Wallet
+                          </button>
+                        )}
+
+                      {account.funding_source && (
+                        <small>
+                          Available:
+                          {' '}
+                          {Number(
+                            account.funding_source.balance || 0
+                          ).toLocaleString()}
+                          {' '}
+                          {account.funding_source.currency}
+                        </small>
+                      )}
+                    </div>
+                  </td>
+
+                  <td>
                     {account.rule ? (
                       <div className="af-rule-summary">
                         <strong>
@@ -557,6 +807,14 @@ export default function AdsFinancePage() {
                         <>
                           <button
                             className="btn small"
+                            disabled={
+                              !account.funding_source
+                            }
+                            title={
+                              account.funding_source
+                                ? 'Demo top up'
+                                : 'Select a funding source first'
+                            }
                             onClick={() =>
                               openDemoTopup(account)
                             }
@@ -581,9 +839,107 @@ export default function AdsFinancePage() {
 
               {!data.accounts?.length && (
                 <tr>
-                  <td colSpan="7">
+                  <td colSpan="8">
                     <div className="af-empty">
                       No ad accounts found.
+                    </div>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="panel af-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Funding Sources</h2>
+
+            <p>
+              Funding wallets available for ad-account
+              top-ups.
+            </p>
+          </div>
+        </div>
+
+        <div className="af-table-wrap">
+          <table className="af-table">
+            <thead>
+              <tr>
+                <th>Source</th>
+                <th>Provider</th>
+                <th>Balance</th>
+                <th>Currency</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {fundingAccounts.map(funding => (
+                <tr key={funding.id}>
+                  <td>
+                    <strong>
+                      {funding.name}
+                    </strong>
+
+                    {funding.demo && (
+                      <span className="af-demo-badge">
+                        DEMO
+                      </span>
+                    )}
+                  </td>
+
+                  <td>
+                    {funding.provider}
+                  </td>
+
+                  <td>
+                    <strong>
+                      {Number(
+                        funding.balance || 0
+                      ).toLocaleString()}
+                    </strong>
+                  </td>
+
+                  <td>
+                    {funding.currency}
+                  </td>
+
+                  <td>
+                    <span
+                      className={
+                        funding.status === 'ACTIVE'
+                          ? 'af-status active'
+                          : 'af-status'
+                      }
+                    >
+                      {funding.status}
+                    </span>
+                  </td>
+
+                  <td>
+                    {funding.demo && (
+                      <button
+                        className="btn small secondary"
+                        onClick={() =>
+                          openFundingSimulator(funding)
+                        }
+                      >
+                        Simulate Balance
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+
+              {!fundingAccounts.length && (
+                <tr>
+                  <td colSpan="6">
+                    <div className="af-empty">
+                      No funding sources yet.
+                      Create one from a demo ad account.
                     </div>
                   </td>
                 </tr>
@@ -777,6 +1133,159 @@ export default function AdsFinancePage() {
       </Modal>
 
       <Modal
+        open={!!walletAccount}
+        title="Create Demo Funding Wallet"
+        onClose={() => {
+          if (!saving) {
+            setWalletAccount(null)
+          }
+        }}
+      >
+        <form onSubmit={createDemoWallet}>
+          <div className="af-lock-box safe">
+            <strong>Demo Wallet Only</strong>
+
+            <span>
+              This balance is simulated.
+              No bank card or real money is used.
+            </span>
+          </div>
+
+          <div className="field">
+            <label>Wallet Name</label>
+
+            <input
+              required
+              value={walletName}
+              onChange={e =>
+                setWalletName(e.target.value)
+              }
+            />
+          </div>
+
+          <div className="field">
+            <label>Starting Balance</label>
+
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              required
+              value={walletStartingBalance}
+              onChange={e =>
+                setWalletStartingBalance(
+                  e.target.value
+                )
+              }
+            />
+
+            <small>
+              Currency:
+              {' '}
+              {walletAccount?.currency || 'USD'}
+            </small>
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={saving}
+              onClick={() =>
+                setWalletAccount(null)
+              }
+            >
+              Cancel
+            </button>
+
+            <button
+              className="btn"
+              disabled={saving}
+            >
+              {saving
+                ? 'Creating...'
+                : 'Create Demo Wallet'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+
+      <Modal
+        open={!!fundingSimulator}
+        title="Funding Wallet Simulator"
+        onClose={() => {
+          if (!saving) {
+            setFundingSimulator(null)
+          }
+        }}
+      >
+        <form onSubmit={saveFundingSimulator}>
+          <div className="af-lock-box safe">
+            <strong>Demo Funding Balance</strong>
+
+            <span>
+              Change the wallet balance to test
+              insufficient-funds logic safely.
+            </span>
+          </div>
+
+          {fundingSimulator && (
+            <div className="connection-step-note">
+              <strong>
+                {fundingSimulator.name}
+              </strong>
+
+              <span>
+                Current:
+                {' '}
+                {fundingSimulator.balance}
+                {' '}
+                {fundingSimulator.currency}
+              </span>
+            </div>
+          )}
+
+          <div className="field">
+            <label>Funding Balance</label>
+
+            <input
+              type="number"
+              min="0"
+              step="0.01"
+              required
+              value={fundingSimBalance}
+              onChange={e =>
+                setFundingSimBalance(
+                  e.target.value
+                )
+              }
+            />
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() =>
+                setFundingSimulator(null)
+              }
+            >
+              Cancel
+            </button>
+
+            <button
+              className="btn"
+              disabled={saving}
+            >
+              Apply Demo Balance
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+
+      <Modal
         open={!!topupAccount}
         title="Demo Manual Top-Up"
         onClose={() => {
@@ -802,11 +1311,25 @@ export default function AdsFinancePage() {
               </strong>
 
               <span>
-                Current balance:
+                Ad balance:
                 {' '}
                 {topupAccount.balance}
                 {' '}
                 {topupAccount.currency}
+              </span>
+
+              <span>
+                Funding source:
+                {' '}
+                {topupAccount.funding_source?.name || 'None'}
+              </span>
+
+              <span>
+                Funding available:
+                {' '}
+                {topupAccount.funding_source?.balance || '0'}
+                {' '}
+                {topupAccount.funding_source?.currency || topupAccount.currency}
               </span>
             </div>
           )}
