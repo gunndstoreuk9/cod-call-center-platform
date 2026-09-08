@@ -3031,3 +3031,8 @@ html[dir="rtl"] .profit-hero>div>span{letter-spacing:0}
 }
 
 /* CONNECTIONS CENTER END */
+
+/* Connections production polish */
+.connections-hero h1{
+  color:#fff!important;
+}

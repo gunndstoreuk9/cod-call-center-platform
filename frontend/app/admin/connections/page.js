@@ -4,10 +4,6 @@ import { useEffect, useMemo, useState } from 'react'
 import { api, API_URL } from '../../../lib/api'
 import Modal from '../../../components/Modal'
 
-const CALLBACK_URL =
-  API_URL.replace(/\/api\/v1\/?$/, '') +
-  '/api/v1/connections/tiktok/callback'
-
 const emptyForm = {
   name: 'TikTok Ads',
   store_id: '',
@@ -37,6 +33,7 @@ export default function ConnectionsPage() {
   const [providers, setProviders] = useState([])
   const [connections, setConnections] = useState([])
   const [stores, setStores] = useState([])
+  const [callbackUrl, setCallbackUrl] = useState('')
 
   const [providerOpen, setProviderOpen] = useState(false)
   const [formOpen, setFormOpen] = useState(false)
@@ -59,15 +56,17 @@ export default function ConnectionsPage() {
 
   const load = async () => {
     try {
-      const [p, c, s] = await Promise.all([
+      const [p, c, s, setup] = await Promise.all([
         api('/connections/providers'),
         api('/connections'),
-        api('/stores')
+        api('/stores'),
+        api('/connections/tiktok/setup-info')
       ])
 
       setProviders(p || [])
       setConnections(c || [])
       setStores(s || [])
+      setCallbackUrl(setup?.callback_url || '')
       setError('')
     } catch (e) {
       setError(e.message)
@@ -671,14 +670,14 @@ export default function ConnectionsPage() {
             </span>
 
             <code>
-              {CALLBACK_URL}
+              {callbackUrl || 'Loading...'}
             </code>
           </div>
 
           <button
             className="btn small secondary"
             onClick={() =>
-              copy(CALLBACK_URL)
+              callbackUrl && copy(callbackUrl)
             }
           >
             Copy
@@ -871,7 +870,7 @@ export default function ConnectionsPage() {
             </span>
 
             <code>
-              {CALLBACK_URL}
+              {callbackUrl || 'Loading...'}
             </code>
           </div>
 

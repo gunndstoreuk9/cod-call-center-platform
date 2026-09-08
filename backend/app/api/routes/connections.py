@@ -1521,3 +1521,18 @@ def list_imported_tiktok_accounts(
         }
         for account in accounts
     ]
+
+
+@router.get("/tiktok/setup-info")
+def tiktok_setup_info(
+    _: User = Depends(
+        require_roles(
+            "OWNER",
+            "ADMIN",
+            "SUPERVISOR",
+        )
+    ),
+):
+    return {
+        "callback_url": _tiktok_callback_url(),
+    }
