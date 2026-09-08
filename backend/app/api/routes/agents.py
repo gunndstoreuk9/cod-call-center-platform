@@ -47,8 +47,27 @@ def list_agents(
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
-    agents = db.query(User).filter(User.role == "AGENT").order_by(User.display_name.asc()).all()
-    return [agent_payload(db, a) for a in agents]
+    agents = (
+        db.query(User)
+        .filter(User.role == "AGENT")
+        .order_by(User.display_name.asc())
+        .all()
+    )
+
+    visible_agents = []
+
+    for agent in agents:
+        payload = agent_payload(db, agent)
+
+        # Removed agents are inactive and have no product access.
+        # Keep their database/history record, but hide them from
+        # the active management screen.
+        if not agent.is_active and not payload["product_ids"]:
+            continue
+
+        visible_agents.append(payload)
+
+    return visible_agents
 
 
 @router.post("", response_model=AgentOut)
