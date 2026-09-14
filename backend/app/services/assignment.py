@@ -3,7 +3,7 @@ from datetime import timedelta
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.time import utcnow
+from app.core.time import date_bounds, utcnow
 from app.models import AgentProduct, Order, User
 
 
@@ -107,6 +107,7 @@ def choose_agent(
         return None
 
     now = utcnow()
+    today_start, today_end = date_bounds("today", None, None)
 
     performance_since = (
         now
@@ -125,6 +126,24 @@ def choose_agent(
     scored = []
 
     for agent in agents:
+
+        # --------------------------------------------------
+        # DAILY FAIRNESS — ABSOLUTE PRIORITY
+        #
+        # Count only leads created today that are currently
+        # assigned to this agent. Existing leads are NEVER
+        # modified; this only decides who gets the NEXT lead.
+        # --------------------------------------------------
+        assigned_today = (
+            db.query(func.count(Order.id))
+            .filter(
+                Order.assigned_agent_id == agent.id,
+                Order.created_at >= today_start,
+                Order.created_at < today_end,
+            )
+            .scalar()
+            or 0
+        )
 
         # --------------------------------------------------
         # 1. CURRENT TOTAL WORKLOAD
@@ -266,6 +285,7 @@ def choose_agent(
 
         scored.append(
             (
+                int(assigned_today),
                 int(open_load),
                 -float(quality_score),
                 int(recent_assignments),
@@ -276,11 +296,12 @@ def choose_agent(
 
     scored.sort(
         key=lambda item: (
-            item[0],  # lowest open load
-            item[1],  # highest quality
-            item[2],  # fewer recent leads
-            item[3],  # longest since last assignment
+            item[0],  # fewest leads assigned today
+            item[1],  # lowest open load
+            item[2],  # highest quality
+            item[3],  # fewer recent leads
+            item[4],  # longest since last assignment
         )
     )
 
-    return scored[0][4]
+    return scored[0][5]
