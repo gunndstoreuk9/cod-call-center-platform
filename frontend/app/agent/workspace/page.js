@@ -223,19 +223,54 @@ export default function WorkspacePage() {
 
   const buildWorkflowBody = (order, outcome = null) => {
     const draft = drafts[order.id] || draftFromOrder(order)
-    const body = {
-      customer_name: String(draft.customer_name || '').trim(),
-      phone: String(draft.phone || '').trim(),
-      city: draft.city || '',
-      address: String(draft.address || '').trim(),
-      call_note: String(draft.call_note || '').trim()
+    const body = {}
+
+    const customerName = String(draft.customer_name || '').trim()
+    const currentCustomerName = String(order.customer_name || '').trim()
+
+    const phone = String(draft.phone || '').trim()
+    const currentPhone = String(order.customer_phone || '').trim()
+
+    const city = draft.city || ''
+    const currentCity = order.city || ''
+
+    const address = String(draft.address || '').trim()
+    const currentAddress = String(order.address || '').trim()
+
+    const note = String(draft.call_note || '').trim()
+    const currentNote = String(order.call_note || '').trim()
+
+    const offerId = draft.offer_id || ''
+    const currentOfferId = order.offer_id || ''
+
+    if (customerName !== currentCustomerName) {
+      body.customer_name = customerName
     }
 
-    if ((draft.offer_id || '') !== (order.offer_id || '')) {
-      body.offer_id = draft.offer_id || ''
+    if (phone !== currentPhone) {
+      body.phone = phone
     }
 
-    if (outcome) body.outcome = outcome
+    if (city !== currentCity) {
+      body.city = city
+    }
+
+    if (address !== currentAddress) {
+      body.address = address
+    }
+
+    if (note !== currentNote) {
+      body.call_note = note
+    }
+
+    if (offerId !== currentOfferId) {
+      body.offer_id = offerId
+    }
+
+    if (outcome) {
+      body.outcome = outcome
+    }
+
     return body
   }
 
@@ -263,8 +298,8 @@ export default function WorkspacePage() {
   const saveOrder = async (order, outcome = null) => {
     if (!order) return
 
-    // Plain Save Changes must work in every tab.
-    // Status actions remain protected for delivery-locked orders.
+    // Plain Save Changes works in every tab.
+    // Status actions stay blocked for delivery-locked orders.
     if (outcome && !order.editable) {
       setError(
         L(
@@ -283,6 +318,19 @@ export default function WorkspacePage() {
       }
     }
 
+    const body = buildWorkflowBody(order, outcome)
+
+    // Nothing changed: reset draft and remove false "unsaved changes".
+    if (!outcome && Object.keys(body).length === 0) {
+      setError('')
+      setDrafts(current => ({
+        ...current,
+        [order.id]: draftFromOrder(order)
+      }))
+      setNotice(L('No changes to save.', 'لا توجد تعديلات للحفظ.'))
+      return
+    }
+
     setSavingId(order.id)
     setError('')
     setNotice('')
@@ -290,16 +338,18 @@ export default function WorkspacePage() {
     try {
       await api(`/orders/agent-workflow/${order.id}`, {
         method: 'POST',
-        body: buildWorkflowBody(order, outcome)
+        body
       })
+
+      // Reload saved server data and rebuild drafts.
+      // This removes "Unsaved changes" after a successful save.
+      await loadBoard(bucket, productId)
 
       setNotice(
         outcome
           ? `${order.customer_name || order.order_number} → ${statusLabel(outcome)}`
           : L('Changes saved successfully.', 'تم حفظ التعديلات بنجاح.')
       )
-
-      await loadBoard(bucket, productId)
     } catch (e) {
       setError(e.message)
     } finally {
