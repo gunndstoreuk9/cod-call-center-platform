@@ -1384,6 +1384,15 @@ def update_order(
     # Agent permissions
     # ----------------------------------------------
     if user.role == "AGENT":
+        # Agents must never change call status through the generic PATCH.
+        # All call outcomes (NO_ANSWER, CANCELLED, CONFIRMED, etc.)
+        # must go through /orders/agent-workflow/{order_id}.
+        if "call_status" in updates:
+            raise HTTPException(
+                403,
+                "Agents must change call status through the agent workflow",
+            )
+
         if (
             "assigned_agent_id" in updates
             and updates["assigned_agent_id"] != user.id
