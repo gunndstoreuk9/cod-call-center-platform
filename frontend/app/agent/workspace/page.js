@@ -58,6 +58,7 @@ export default function WorkspacePage() {
   const [productId, setProductId] = useState('')
   const [board, setBoard] = useState(EMPTY_BOARD)
   const [drafts, setDrafts] = useState({})
+  const [savedDrafts, setSavedDrafts] = useState({})
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -128,8 +129,12 @@ export default function WorkspacePage() {
       setBoard(safe)
 
       const nextDrafts = {}
-      for (const order of safe.orders) nextDrafts[order.id] = draftFromOrder(order)
+      for (const order of safe.orders) {
+        nextDrafts[order.id] = draftFromOrder(order)
+      }
+
       setDrafts(nextDrafts)
+      setSavedDrafts(nextDrafts)
 
       setSelectedIds(current =>
         current.filter(id =>
@@ -341,8 +346,18 @@ export default function WorkspacePage() {
         body
       })
 
-      // Reload saved server data and rebuild drafts.
-      // This removes "Unsaved changes" after a successful save.
+      // The current draft is now saved.
+      // Clear "Unsaved changes" immediately.
+      const justSaved = {
+        ...(drafts[order.id] || draftFromOrder(order))
+      }
+
+      setSavedDrafts(current => ({
+        ...current,
+        [order.id]: justSaved
+      }))
+
+      // Reload canonical values from the server afterwards.
       await loadBoard(bucket, productId)
 
       setNotice(
@@ -610,15 +625,17 @@ export default function WorkspacePage() {
 
   const orderIsDirty = order => {
     const draft = drafts[order.id]
-    if (!draft) return false
+    const saved = savedDrafts[order.id]
+
+    if (!draft || !saved) return false
 
     return (
-      String(draft.customer_name || '').trim() !== String(order.customer_name || '').trim() ||
-      String(draft.phone || '').trim() !== String(order.customer_phone || '').trim() ||
-      (draft.city || '') !== (order.city || '') ||
-      String(draft.address || '').trim() !== String(order.address || '').trim() ||
-      (draft.offer_id || '') !== (order.offer_id || '') ||
-      String(draft.call_note || '').trim() !== String(order.call_note || '').trim()
+      String(draft.customer_name || '').trim() !== String(saved.customer_name || '').trim() ||
+      String(draft.phone || '').trim() !== String(saved.phone || '').trim() ||
+      String(draft.city || '').trim() !== String(saved.city || '').trim() ||
+      String(draft.address || '').trim() !== String(saved.address || '').trim() ||
+      String(draft.offer_id || '') !== String(saved.offer_id || '') ||
+      String(draft.call_note || '').trim() !== String(saved.call_note || '').trim()
     )
   }
 
