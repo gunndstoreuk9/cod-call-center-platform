@@ -74,6 +74,7 @@ def _avg_response_seconds(
 def choose_agent(
     db: Session,
     product_id: str,
+    customer_id: str | None = None,
 ) -> User | None:
     """
     Smart COD lead router.
@@ -108,6 +109,41 @@ def choose_agent(
 
     now = utcnow()
     today_start, today_end = date_bounds("today", None, None)
+
+    # --------------------------------------------------
+    # SAME CUSTOMER / SAME DAY
+    #
+    # If this customer already has an order assigned today,
+    # keep every new order with the same eligible agent.
+    # This prevents two agents from confirming the same client.
+    # --------------------------------------------------
+    if customer_id:
+        same_customer_order = (
+            db.query(Order)
+            .filter(
+                Order.customer_id == customer_id,
+                Order.assigned_agent_id.isnot(None),
+                Order.created_at >= today_start,
+                Order.created_at < today_end,
+            )
+            .order_by(Order.created_at.asc())
+            .first()
+        )
+
+        if same_customer_order:
+            same_agent = next(
+                (
+                    agent
+                    for agent in agents
+                    if agent.id == same_customer_order.assigned_agent_id
+                ),
+                None,
+            )
+
+            # Reuse only if that agent is active and authorized
+            # for the current product (already guaranteed by agents list).
+            if same_agent:
+                return same_agent
 
     performance_since = (
         now

@@ -5,7 +5,7 @@ from typing import Any
 import httpx
 from sqlalchemy.orm import Session
 
-from app.core.time import utcnow
+from app.core.time import utcnow, date_bounds
 from app.models import (
     Customer, DeliveryDestination, DeliveryEvent, DeliveryShipment, DeliveryStatusMapping,
     DeliverySyncRun, IntegrationConfig, IntegrationEvent, Order, OrderStatusHistory, Product
@@ -180,6 +180,55 @@ def test_connection(integration: IntegrationConfig) -> dict:
 def dispatch_order(db: Session, integration: IntegrationConfig, order: Order) -> DeliveryShipment:
     if order.call_status not in {"CONFIRMED", "BLACKLIST"}:
         raise DigylogError("Order must be CONFIRMED before dispatch")
+
+    # Prevent duplicate Digylog submissions for the same customer
+    # on the same local business day.
+    #
+    # Customer is keyed by normalized phone in our system, so this
+    # catches 06..., +212..., 00212... representations consistently.
+    today_start, today_end = date_bounds("today", None, None)
+
+    customer_shipment_today = (
+        db.query(DeliveryShipment)
+        .join(
+            Order,
+            Order.id == DeliveryShipment.order_id,
+        )
+        .filter(
+            Order.customer_id == order.customer_id,
+            Order.id != order.id,
+            DeliveryShipment.provider == "DIGYLOG",
+            DeliveryShipment.status != "FAILED",
+            DeliveryShipment.accepted_at.isnot(None),
+            DeliveryShipment.accepted_at >= today_start,
+            DeliveryShipment.accepted_at < today_end,
+        )
+        .order_by(
+            DeliveryShipment.accepted_at.desc()
+        )
+        .first()
+    )
+
+    if customer_shipment_today:
+        previous_order = (
+            db.query(Order)
+            .filter(
+                Order.id == customer_shipment_today.order_id
+            )
+            .first()
+        )
+
+        previous_ref = (
+            previous_order.order_number
+            if previous_order
+            else customer_shipment_today.order_id
+        )
+
+        raise DigylogError(
+            "Duplicate customer today: "
+            f"this customer already has a Digylog order ({previous_ref}). "
+            "Review the customer's existing order before sending another one."
+        )
     existing = (
         db.query(DeliveryShipment)
         .filter(DeliveryShipment.order_id == order.id, DeliveryShipment.provider == "DIGYLOG", DeliveryShipment.status.notin_(["FAILED", "CANCELLED"]))

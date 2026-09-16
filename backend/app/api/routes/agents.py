@@ -197,7 +197,7 @@ def remove_agent(
 
         # Smart balancer now ignores the removed agent because
         # the agent is inactive and has no product access.
-        new_agent = choose_agent(db, order.product_id)
+        new_agent = choose_agent(db, order.product_id, order.customer_id)
 
         if new_agent:
             order.assigned_agent_id = new_agent.id

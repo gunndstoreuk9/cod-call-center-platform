@@ -53,7 +53,7 @@ def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) 
     qty = max(int(item.get("quantity") or 1), 1)
     total = Decimal(str(item.get("total_price"))) if item.get("total_price") not in (None, "") else Decimal(product.selling_price) * qty
     unit = total / qty if qty else Decimal(product.selling_price)
-    agent = choose_agent(db, product.id) if config.get("auto_assign", True) else None
+    agent = choose_agent(db, product.id, customer.id) if config.get("auto_assign", True) else None
     row = Order(
         order_number=new_order_number(), store_id=store.id, product_id=product.id, customer_id=customer.id,
         assigned_agent_id=agent.id if agent else None, quantity=qty, unit_price=unit, total_price=total,

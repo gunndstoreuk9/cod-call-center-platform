@@ -1751,7 +1751,7 @@ def auto_assign_order(
     row = db.query(Order).filter(Order.id == order_id).first()
     if not row:
         raise HTTPException(404, "Order not found")
-    agent = choose_agent(db, row.product_id)
+    agent = choose_agent(db, row.product_id, row.customer_id)
     if not agent:
         raise HTTPException(409, "No active agent is enabled for this product")
     previous = row.assigned_agent_id
