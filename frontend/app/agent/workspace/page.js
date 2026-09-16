@@ -341,24 +341,50 @@ export default function WorkspacePage() {
     setNotice('')
 
     try {
-      await api(`/orders/agent-workflow/${order.id}`, {
+      const saved = await api(`/orders/agent-workflow/${order.id}`, {
         method: 'POST',
         body
       })
 
-      // The current draft is now saved.
-      // Clear "Unsaved changes" immediately.
-      const justSaved = {
-        ...(drafts[order.id] || draftFromOrder(order))
+      // READY tab: update directly from the successful save response.
+      // Do not immediately reload the board, because that can replace
+      // the freshly saved draft with an older board snapshot.
+      if (!outcome && bucket === 'READY') {
+        const savedOrder = {
+          ...order,
+          ...(saved || {})
+        }
+
+        const savedDraft = draftFromOrder(savedOrder)
+
+        setBoard(current => ({
+          ...current,
+          orders: current.orders.map(item =>
+            item.id === order.id ? savedOrder : item
+          )
+        }))
+
+        setDrafts(current => ({
+          ...current,
+          [order.id]: savedDraft
+        }))
+
+        setSavedDrafts(current => ({
+          ...current,
+          [order.id]: savedDraft
+        }))
+      } else {
+        const justSaved = {
+          ...(drafts[order.id] || draftFromOrder(order))
+        }
+
+        setSavedDrafts(current => ({
+          ...current,
+          [order.id]: justSaved
+        }))
+
+        await loadBoard(bucket, productId)
       }
-
-      setSavedDrafts(current => ({
-        ...current,
-        [order.id]: justSaved
-      }))
-
-      // Reload canonical values from the server afterwards.
-      await loadBoard(bucket, productId)
 
       setNotice(
         outcome
