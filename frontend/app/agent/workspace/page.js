@@ -818,7 +818,9 @@ export default function WorkspacePage() {
             const selectedOffer = offers.find(offer => offer.id === draft.offer_id)
             const currentOfferUnavailable =
               order.offer_id && !offers.some(offer => offer.id === order.offer_id)
-            const editable = !!order.editable && !LOCKED_DELIVERY.has(order.delivery_status)
+            // Customer/order information can be edited from every tab.
+            // Call-result actions remain protected separately.
+            const editable = true
             const dirty = orderIsDirty(order)
             const blacklisted = order.call_status === 'BLACKLIST'
             const ready = order.call_status === 'CONFIRMED' && order.delivery_status === 'READY'
@@ -1032,7 +1034,9 @@ export default function WorkspacePage() {
                       />
                     </label>
 
-                    {!blacklisted && (
+                    {!blacklisted &&
+                      order.editable &&
+                      !LOCKED_DELIVERY.has(order.delivery_status) && (
                       <div className="tw-outcome-section">
                         <div className="tw-section-title">
                           <strong>{L('Call result', 'نتيجة المكالمة')}</strong>
