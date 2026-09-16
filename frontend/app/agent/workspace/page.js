@@ -261,7 +261,19 @@ export default function WorkspacePage() {
   }
 
   const saveOrder = async (order, outcome = null) => {
-    if (!order?.editable) return
+    if (!order) return
+
+    // Plain Save Changes must work in every tab.
+    // Status actions remain protected for delivery-locked orders.
+    if (outcome && !order.editable) {
+      setError(
+        L(
+          'This order is already in delivery. You can edit customer information, but you cannot change the call result.',
+          'تم إرسال هذا الطلب للتوصيل. يمكنك تعديل بيانات العميل، لكن لا يمكنك تغيير نتيجة المكالمة.'
+        )
+      )
+      return
+    }
 
     if (outcome === 'CONFIRMED') {
       const validation = validateConfirmation(order)

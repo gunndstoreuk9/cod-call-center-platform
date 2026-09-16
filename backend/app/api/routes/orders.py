@@ -761,18 +761,35 @@ def agent_workflow(
         .first()
     )
 
-    if (
+    is_delivery_locked = (
         row.delivery_status
         in AGENT_LOCKED_DELIVERY_STATUSES
         or (
             shipment
             and shipment.tracking_number
         )
-    ):
-        raise HTTPException(
-            409,
-            "This order was already sent to delivery and is locked for agent editing",
-        )
+    )
+
+    requested_outcome = str(
+        payload.get("outcome") or ""
+    ).strip().upper()
+
+    requested_offer_change = "offer_id" in payload
+
+    # Delivery-locked orders can still receive customer/contact/note
+    # corrections, but workflow status and bundle cannot be changed.
+    if is_delivery_locked:
+        if requested_outcome:
+            raise HTTPException(
+                409,
+                "Order was already sent to delivery. Customer information can be edited, but call status cannot be changed.",
+            )
+
+        if requested_offer_change:
+            raise HTTPException(
+                409,
+                "Order was already sent to delivery. The product offer can no longer be changed.",
+            )
 
     customer = (
         db.query(Customer)
