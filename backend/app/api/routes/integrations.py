@@ -14,9 +14,16 @@ from app.services.audit import log_action
 from app.services.digylog import DigylogError, apply_webhook, dispatch_order, test_connection
 from app.services.google_sheets import apps_script, import_sheet_order
 from app.services.integration_crypto import decrypt_secret_dict, encrypt_secret_dict
+from app.services.ozon_express import (
+    OzonExpressError,
+    apply_webhook as apply_ozon_webhook,
+    dispatch_order as dispatch_ozon_order,
+    sync_cities as sync_ozon_cities,
+    test_connection as test_ozon_connection,
+)
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
-SUPPORTED_PROVIDERS = {"DIGYLOG", "GOOGLE_SHEETS"}
+SUPPORTED_PROVIDERS = {"DIGYLOG", "GOOGLE_SHEETS", "OZON_EXPRESS"}
 
 
 def _provider(value: str) -> str:
@@ -39,6 +46,8 @@ def _public_webhook(row: IntegrationConfig) -> str:
         return f"{base}/api/v1/integrations/digylog/{row.id}/webhook"
     if row.provider == "GOOGLE_SHEETS":
         return f"{base}/api/v1/integrations/google-sheets/{row.id}/webhook"
+    if row.provider == "OZON_EXPRESS":
+        return f"{base}/api/v1/integrations/ozon-express/{row.id}/webhook"
     return ""
 
 
@@ -106,11 +115,18 @@ def create_integration(
         raise HTTPException(400, "Invalid store")
     if provider == "GOOGLE_SHEETS" and not payload.store_id:
         raise HTTPException(400, "Google Sheets integration requires a store")
+    if provider == "OZON_EXPRESS" and not payload.store_id:
+        raise HTTPException(400, "Ozon Express integration requires a store")
 
     secret_values = {k: v for k, v in (payload.secrets or {}).items() if v not in (None, "")}
     secret_values.setdefault("webhook_token", pysecrets.token_urlsafe(32))
     if provider == "DIGYLOG" and not secret_values.get("api_token"):
         raise HTTPException(400, "Digylog API token is required")
+    if provider == "OZON_EXPRESS" and (
+        not secret_values.get("client_id")
+        or not secret_values.get("api_key")
+    ):
+        raise HTTPException(400, "Ozon Express Client ID and API Key are required")
 
     config = dict(payload.config or {})
     if provider == "DIGYLOG":
@@ -123,9 +139,21 @@ def create_integration(
         config.setdefault("port", 2)
         config.setdefault("add_status", 1)
         config.setdefault("check_duplicate", True)
-    else:
+    elif provider == "GOOGLE_SHEETS":
         config.setdefault("sheet_name", "Sheet1")
         config.setdefault("auto_assign", True)
+    else:
+        config.setdefault("api_base_url", "https://api.ozonexpress.ma")
+        config.setdefault(
+            "create_parcel_url",
+            "https://api.ozonexpress.ma/customers/{client_id}/{api_key}/add-parcel",
+        )
+        config.setdefault("cities_url", "https://api.ozonexpress.ma/cities")
+        config.setdefault("auth_mode", "path")
+        config.setdefault("parcel_stock", 0)
+        config.setdefault("parcel_open", 1)
+        config.setdefault("parcel_fragile", 0)
+        config.setdefault("parcel_replace", 0)
 
     row = IntegrationConfig(
         store_id=payload.store_id,
@@ -160,6 +188,8 @@ def update_integration(
             raise HTTPException(400, "Invalid store")
         if row.provider == "GOOGLE_SHEETS" and not store_id:
             raise HTTPException(400, "Google Sheets integration requires a store")
+        if row.provider == "OZON_EXPRESS" and not store_id:
+            raise HTTPException(400, "Ozon Express integration requires a store")
         row.store_id = store_id
     if "name" in updates and updates["name"] is not None:
         row.name = str(updates.pop("name")).strip()
@@ -259,6 +289,14 @@ def test_integration(
     row = _integration_or_404(db, integration_id)
     if row.provider == "DIGYLOG":
         result = test_connection(row)
+    elif row.provider == "OZON_EXPRESS":
+        result = test_ozon_connection(row)
+        if result.get("ok"):
+            result["cities_synced"] = sync_ozon_cities(db, row)
+            result["message"] = (
+                f"{result['message']} "
+                f"{result['cities_synced']} cities synced."
+            )
     else:
         result = {"ok": True, "message": "Google Sheets webhook is ready. Generate the Apps Script and run sendNewLeadsToCallCenter once to test the full connection."}
     row.last_test_status = "SUCCESS" if result.get("ok") else "FAILED"
@@ -955,3 +993,152 @@ def auto_bulk_dispatch_to_digylog(
     }
 
 
+
+
+@router.api_route("/ozon-express/{integration_id}/webhook", methods=["POST", "PUT"])
+async def ozon_express_webhook(
+    integration_id: str,
+    request: Request,
+    token: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    row = _integration_or_404(db, integration_id, "OZON_EXPRESS")
+    if not row.is_active:
+        raise HTTPException(409, "Integration is disabled")
+    supplied = (
+        token
+        or request.headers.get("X-Webhook-Token")
+        or request.headers.get("X-Ozon-Token")
+    )
+    _verify_webhook_token(row, supplied)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "Webhook body must be JSON") from exc
+    result = apply_ozon_webhook(db, row, body)
+    db.commit()
+    return result
+
+
+@router.post("/ozon-express/{integration_id}/dispatch/{order_id}")
+def dispatch_to_ozon_express(
+    integration_id: str,
+    order_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    if user.role not in {"OWNER", "ADMIN", "SUPERVISOR", "AGENT"}:
+        raise HTTPException(403, "Insufficient permissions")
+
+    row = _integration_or_404(db, integration_id, "OZON_EXPRESS")
+    if not row.is_active:
+        raise HTTPException(409, "Ozon Express integration is disabled")
+
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    if user.role == "AGENT":
+        if order.assigned_agent_id != user.id:
+            raise HTTPException(403, "This order is not assigned to you")
+        allowed_product = (
+            db.query(AgentProduct)
+            .filter(
+                AgentProduct.agent_id == user.id,
+                AgentProduct.product_id == order.product_id,
+            )
+            .first()
+        )
+        if not allowed_product:
+            raise HTTPException(403, "You no longer have access to this product")
+
+    if row.store_id and row.store_id != order.store_id:
+        raise HTTPException(
+            400,
+            "This Ozon Express integration is linked to a different store",
+        )
+
+    try:
+        shipment = dispatch_ozon_order(db, row, order)
+        log_action(
+            db,
+            user_id=user.id,
+            action="ORDER_DISPATCHED_OZON_EXPRESS",
+            entity_type="ORDER",
+            entity_id=order.id,
+            after={
+                "integration_id": row.id,
+                "tracking": shipment.tracking_number,
+            },
+        )
+        db.commit()
+        db.refresh(shipment)
+        return {
+            "ok": True,
+            "shipment_id": shipment.id,
+            "tracking_number": shipment.tracking_number,
+            "delivery_status": order.delivery_status,
+        }
+    except OzonExpressError as exc:
+        db.commit()
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/ozon-express/dispatch/{order_id}")
+def dispatch_to_default_ozon_express(
+    order_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    if user.role not in {"OWNER", "ADMIN", "SUPERVISOR", "AGENT"}:
+        raise HTTPException(403, "Insufficient permissions")
+
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    if user.role == "AGENT" and order.assigned_agent_id != user.id:
+        raise HTTPException(403, "This order is not assigned to you")
+
+    row = (
+        db.query(IntegrationConfig)
+        .filter(
+            IntegrationConfig.provider == "OZON_EXPRESS",
+            IntegrationConfig.is_active.is_(True),
+            IntegrationConfig.store_id == order.store_id,
+        )
+        .order_by(IntegrationConfig.created_at.asc())
+        .first()
+    )
+
+    if not row:
+        raise HTTPException(
+            409,
+            "No active Ozon Express integration is configured for this store",
+        )
+
+    try:
+        shipment = dispatch_ozon_order(db, row, order)
+        log_action(
+            db,
+            user_id=user.id,
+            action="ORDER_DISPATCHED_OZON_EXPRESS",
+            entity_type="ORDER",
+            entity_id=order.id,
+            after={
+                "integration_id": row.id,
+                "tracking": shipment.tracking_number,
+            },
+        )
+        db.commit()
+        db.refresh(shipment)
+        return {
+            "ok": True,
+            "integration_id": row.id,
+            "shipment_id": shipment.id,
+            "tracking_number": shipment.tracking_number,
+            "delivery_status": order.delivery_status,
+        }
+    except OzonExpressError as exc:
+        db.commit()
+        raise HTTPException(502, str(exc)) from exc

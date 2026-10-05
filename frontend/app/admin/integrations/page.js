@@ -19,6 +19,21 @@ const emptyDigylog = {
   orders_url: 'https://api.digylog.com/api/v2/seller/orders'
 }
 
+const emptyOzon = {
+  name: 'Ozon Express Morocco',
+  store_id: '',
+  client_id: '',
+  api_key: '',
+  parcel_stock: 0,
+  parcel_open: 1,
+  parcel_fragile: 0,
+  parcel_replace: 0,
+  parcel_nature: '',
+  api_base_url: 'https://api.ozonexpress.ma',
+  create_parcel_url: 'https://api.ozonexpress.ma/customers/{client_id}/{api_key}/add-parcel',
+  cities_url: 'https://api.ozonexpress.ma/cities'
+}
+
 const emptySheets = {
   name: 'Google Sheets Leads',
   store_id: '',
@@ -28,9 +43,9 @@ const emptySheets = {
 }
 
 function providerLabel(provider) {
-  return provider === 'GOOGLE_SHEETS'
-    ? 'Google Sheets'
-    : 'Digylog'
+  if (provider === 'GOOGLE_SHEETS') return 'Google Sheets'
+  if (provider === 'OZON_EXPRESS') return 'Ozon Express'
+  return 'Digylog'
 }
 
 export default function IntegrationsPage() {
@@ -44,6 +59,7 @@ export default function IntegrationsPage() {
   const [open, setOpen] = useState(null)
 
   const [digy, setDigy] = useState(emptyDigylog)
+  const [ozon, setOzon] = useState(emptyOzon)
   const [sheets, setSheets] = useState(emptySheets)
 
   const [editing, setEditing] = useState(null)
@@ -78,6 +94,10 @@ export default function IntegrationsPage() {
           store_id: f.store_id || storeId
         }))
 
+        setOzon(f => ({
+          ...f,
+          store_id: f.store_id || storeId
+        }))
         setSheets(f => ({
           ...f,
           store_id: f.store_id || storeId
@@ -168,6 +188,51 @@ export default function IntegrationsPage() {
 
       flash(t('Digylog integration saved.'))
 
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const createOzon = async e => {
+    e.preventDefault()
+    setSaving(true)
+    setError('')
+
+    try {
+      await api('/integrations', {
+        method: 'POST',
+        body: {
+          provider: 'OZON_EXPRESS',
+          name: ozon.name,
+          store_id: ozon.store_id,
+          is_active: true,
+          config: {
+            api_base_url: ozon.api_base_url,
+            create_parcel_url: ozon.create_parcel_url,
+            cities_url: ozon.cities_url,
+            auth_mode: 'path',
+            parcel_stock: Number(ozon.parcel_stock),
+            parcel_open: Number(ozon.parcel_open),
+            parcel_fragile: Number(ozon.parcel_fragile),
+            parcel_replace: Number(ozon.parcel_replace),
+            parcel_nature: ozon.parcel_nature
+          },
+          secrets: {
+            client_id: ozon.client_id,
+            api_key: ozon.api_key
+          }
+        }
+      })
+
+      setOpen(null)
+      setOzon({
+        ...emptyOzon,
+        store_id: stores[0]?.id || ''
+      })
+      flash(t('Ozon Express integration saved.'))
       await load()
     } catch (err) {
       setError(err.message)
@@ -492,6 +557,13 @@ export default function IntegrationsPage() {
           </button>
 
           <button
+            className="btn"
+            onClick={() => setOpen('ozon')}
+          >
+            {t('+ Connect Ozon Express')}
+          </button>
+
+          <button
             className="btn secondary"
             onClick={() => setOpen('sheets')}
           >
@@ -539,7 +611,7 @@ export default function IntegrationsPage() {
                   <td colSpan="5">
                     <div className="empty">
                       {t(
-                        'No integration yet. Connect Digylog or Google Sheets above.'
+                        'No integration yet. Connect Digylog, Ozon Express or Google Sheets above.'
                       )}
                     </div>
                   </td>
@@ -617,14 +689,16 @@ export default function IntegrationsPage() {
                           flexWrap: 'wrap'
                         }}
                       >
-                        <button
-                          className="btn small"
-                          onClick={() =>
-                            openEdit(row)
-                          }
-                        >
-                          Edit
-                        </button>
+                        {row.provider !== 'OZON_EXPRESS' && (
+                          <button
+                            className="btn small"
+                            onClick={() =>
+                              openEdit(row)
+                            }
+                          >
+                            Edit
+                          </button>
+                        )}
 
                         <button
                           className="btn small secondary"
@@ -984,6 +1058,148 @@ export default function IntegrationsPage() {
               {saving
                 ? t('Saving...')
                 : t('Save Digylog')}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* CREATE OZON EXPRESS */}
+      <Modal
+        open={open === 'ozon'}
+        title="Connect Ozon Express"
+        onClose={() => setOpen(null)}
+        wide
+      >
+        <form onSubmit={createOzon}>
+          <div className="form-grid">
+            <div className="field">
+              <label>{t('Connection Name')}</label>
+              <input
+                required
+                value={ozon.name}
+                onChange={e => setOzon({...ozon, name: e.target.value})}
+              />
+            </div>
+
+            <div className="field">
+              <label>{t('Platform Store')}</label>
+              <select
+                required
+                value={ozon.store_id}
+                onChange={e => setOzon({...ozon, store_id: e.target.value})}
+              >
+                {stores.map(s => (
+                  <option value={s.id} key={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="field">
+              <label>{t('Ozon Customer ID')}</label>
+              <input
+                required
+                autoComplete="off"
+                value={ozon.client_id}
+                onChange={e => setOzon({...ozon, client_id: e.target.value})}
+              />
+            </div>
+
+            <div className="field">
+              <label>{t('Ozon API Key')}</label>
+              <input
+                required
+                type="password"
+                autoComplete="new-password"
+                value={ozon.api_key}
+                onChange={e => setOzon({...ozon, api_key: e.target.value})}
+              />
+              <small>
+                {t('Stored encrypted. It is never returned to the browser after save.')}
+              </small>
+            </div>
+
+            <div className="field">
+              <label>{t('Parcel Source')}</label>
+              <select
+                value={ozon.parcel_stock}
+                onChange={e => setOzon({...ozon, parcel_stock: e.target.value})}
+              >
+                <option value="0">{t('Ramassage (0)')}</option>
+                <option value="1">{t('Stock (1)')}</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>{t('Open Parcel')}</label>
+              <select
+                value={ozon.parcel_open}
+                onChange={e => setOzon({...ozon, parcel_open: e.target.value})}
+              >
+                <option value="1">{t('Open parcel (1)')}</option>
+                <option value="2">{t('Do not open (2)')}</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>{t('Fragile')}</label>
+              <select
+                value={ozon.parcel_fragile}
+                onChange={e => setOzon({...ozon, parcel_fragile: e.target.value})}
+              >
+                <option value="0">{t('No (0)')}</option>
+                <option value="1">{t('Yes (1)')}</option>
+              </select>
+            </div>
+
+            <div className="field">
+              <label>{t('Exchange / Replace')}</label>
+              <select
+                value={ozon.parcel_replace}
+                onChange={e => setOzon({...ozon, parcel_replace: e.target.value})}
+              >
+                <option value="0">{t('No (0)')}</option>
+                <option value="1">{t('Yes (1)')}</option>
+              </select>
+            </div>
+
+            <div className="field full">
+              <label>{t('Default Parcel Nature (optional)')}</label>
+              <input
+                value={ozon.parcel_nature}
+                onChange={e => setOzon({...ozon, parcel_nature: e.target.value})}
+              />
+            </div>
+
+            <div className="field full">
+              <label>{t('API Base URL')}</label>
+              <input
+                required
+                value={ozon.api_base_url}
+                onChange={e => setOzon({...ozon, api_base_url: e.target.value})}
+              />
+            </div>
+
+            <div className="field full">
+              <label>{t('Cities API URL')}</label>
+              <input
+                required
+                value={ozon.cities_url}
+                onChange={e => setOzon({...ozon, cities_url: e.target.value})}
+              />
+            </div>
+          </div>
+
+          <div className="form-actions">
+            <button
+              type="button"
+              className="btn secondary"
+              onClick={() => setOpen(null)}
+            >
+              {t('Cancel')}
+            </button>
+
+            <button className="btn" disabled={saving}>
+              {saving ? t('Saving...') : t('Save Ozon Express')}
             </button>
           </div>
         </form>
