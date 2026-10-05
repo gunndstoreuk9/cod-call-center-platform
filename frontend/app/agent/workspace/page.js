@@ -517,6 +517,36 @@ export default function WorkspacePage() {
     )
   }
 
+  const dispatchOzonExpress = async order => {
+    setDispatchingId(order.id)
+    setError('')
+    setNotice('')
+
+    try {
+      const result = await api(
+        `/integrations/ozon-express/dispatch/${order.id}`,
+        { method: 'POST' }
+      )
+
+      setNotice(
+        `${L(
+          'Sent to Ozon Express',
+          'تم الإرسال إلى Ozon Express'
+        )}${
+          result.tracking_number
+            ? ` · ${result.tracking_number}`
+            : ''
+        }`
+      )
+
+      await loadBoard(bucket, productId)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
   const bulkDispatch = async () => {
     if (!selectedIds.length) return
 
@@ -540,6 +570,53 @@ export default function WorkspacePage() {
       await loadBoard(bucket, productId)
     } catch (e) {
       setError(e.message)
+    } finally {
+      setBulkBusy(false)
+    }
+  }
+
+  const bulkDispatchOzon = async () => {
+    if (!selectedIds.length) return
+
+    setBulkBusy(true)
+    setError('')
+    setBulkResult(null)
+
+    const results = []
+
+    try {
+      for (const orderId of selectedIds) {
+        try {
+          const result = await api(
+            `/integrations/ozon-express/dispatch/${orderId}`,
+            { method: 'POST' }
+          )
+
+          results.push({
+            order_id: orderId,
+            ok: true,
+            tracking_number: result.tracking_number
+          })
+        } catch (e) {
+          results.push({
+            order_id: orderId,
+            ok: false,
+            error: e.message
+          })
+        }
+      }
+
+      const sent = results.filter(x => x.ok).length
+      const failed = results.length - sent
+
+      setBulkResult({
+        sent,
+        failed,
+        failures: results.filter(x => !x.ok).slice(0, 5)
+      })
+
+      setSelectedIds([])
+      await loadBoard(bucket, productId)
     } finally {
       setBulkBusy(false)
     }
@@ -1191,6 +1268,22 @@ export default function WorkspacePage() {
                             : L('Send to Digylog', 'إرسال إلى Digylog')}
                       </button>
                     )}
+
+                    {ready && (
+                      <button
+                        type="button"
+                        className="tw-dispatch-btn"
+                        disabled={dispatchingId === order.id}
+                        onClick={() => dispatchOzonExpress(order)}
+                      >
+                        {dispatchingId === order.id
+                          ? L('Sending...', 'جاري الإرسال...')
+                          : L(
+                              'Send to Ozon Express',
+                              'إرسال إلى Ozon Express'
+                            )}
+                      </button>
+                    )}
                   </>
                 ) : (
                   <div className="tw-readonly-block">
@@ -1255,6 +1348,19 @@ export default function WorkspacePage() {
               {bulkBusy
                 ? L('Sending...', 'جاري الإرسال...')
                 : `${L('Send selected to Digylog', 'إرسال المحدد إلى Digylog')} (${selectedIds.length})`}
+            </button>
+            <button
+              type="button"
+              className="tw-bulk-send"
+              disabled={bulkBusy}
+              onClick={bulkDispatchOzon}
+            >
+              {bulkBusy
+                ? L('Sending...', 'جاري الإرسال...')
+                : `${L(
+                    'Send selected to Ozon Express',
+                    'إرسال المحدد إلى Ozon Express'
+                  )} (${selectedIds.length})`}
             </button>
           </div>
         </div>
