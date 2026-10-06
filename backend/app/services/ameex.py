@@ -192,7 +192,9 @@ def build_payload(db: Session, integration: IntegrationConfig, order: Order) -> 
         raise AmeexError("AMEEX requires a phone number with at least 9 digits")
     if not customer.name or Decimal(order.total_price) < 0:
         raise AmeexError("Receiver and non-negative COD are required")
-    return {"type": "SIMPLE", "receiver": customer.name, "phone": phone,
+    _, secrets = _settings(integration)
+    return {"type": "SIMPLE", "business": str(secrets.get("client_id") or "").strip(),
+            "receiver": customer.name, "phone": phone,
             "city": _city_id(db, integration, order.city or customer.city),
             "cod": str(Decimal(order.total_price)),
             "address": order.address or customer.address or "",
