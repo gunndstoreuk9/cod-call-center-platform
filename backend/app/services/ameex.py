@@ -85,6 +85,7 @@ def _request(integration: IntegrationConfig, method: str, path: str, payload: di
                     for key in ("type", "msg", "message"):
                         if isinstance(data.get(key), (str, int, bool)):
                             parts.append(key + "=" + _safe_error(data[key], secrets)[:200])
+                parts.append("response=" + _safe_error(str(data), secrets)[:1000])
                 raise AmeexError("AMEEX Cities response: " + "; ".join(parts)) from exc
         return data
     except Exception as exc:
