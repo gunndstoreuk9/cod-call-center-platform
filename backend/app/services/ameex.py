@@ -68,6 +68,10 @@ def _request(integration: IntegrationConfig, method: str, path: str, payload: di
             response = client.request(method, BASE_URL + path, headers=headers, data=payload)
         response.raise_for_status()
         data = response.json()
+        if isinstance(data, dict) and "api" in data:
+            if "login" in data and str(data["login"]).lower() != "success":
+                raise AmeexError("AMEEX authentication failed; check Client ID and API Key")
+            data = data["api"]
         if isinstance(data, dict) and (
             data.get("success") is False or data.get("SUCCESS") is False
             or str(data.get("type", "")).lower() in {"error", "failed", "failure"}
@@ -85,7 +89,6 @@ def _request(integration: IntegrationConfig, method: str, path: str, payload: di
                     for key in ("type", "msg", "message"):
                         if isinstance(data.get(key), (str, int, bool)):
                             parts.append(key + "=" + _safe_error(data[key], secrets)[:200])
-                parts.append("response=" + _safe_error(str(data), secrets)[:1000])
                 raise AmeexError("AMEEX Cities response: " + "; ".join(parts)) from exc
         return data
     except Exception as exc:

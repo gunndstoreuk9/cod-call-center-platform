@@ -72,7 +72,8 @@ def mock(monkeypatch, calls, fail=False):
         def request(self, method, url, headers, data):
             calls.append((method,url,headers,data))
             if fail and method == 'POST': raise httpx.ReadTimeout('Timeout')
-            body = {'CITIES':[{'ID':'1','NAME':'Casablanca'}]} if url.endswith('/Cities') else {'PARCEL_CODE':'AMX-'+str(len(calls))}
+            body = {'type':'success','cities':{'1':{'id':1,'name':'Casablanca'}}} if url.endswith('/Cities') else {'type':'success','PARCEL_CODE':'AMX-'+str(len(calls))}
+            body = {'login':'success','api':body}
             return httpx.Response(200,json=body,request=httpx.Request(method,url))
     monkeypatch.setattr(ameex.httpx,'Client',FakeClient)
 
