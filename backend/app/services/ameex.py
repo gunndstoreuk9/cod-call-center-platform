@@ -268,7 +268,7 @@ def dispatch_order(db: Session, integration: IntegrationConfig, order: Order) ->
     db.flush()
     try:
         data = _request(integration, "POST", "/Delivery/Parcels/Action/Type/Add", payload)
-        tracking = _find_value(data, ("PARCEL_CODE", "parcel_code", "ParcelCode", "CODE"))
+        tracking = _find_value(data, ("PARCEL_CODE", "parcel_code", "ParcelCode", "CODE", "code"))
         if not isinstance(tracking, (str, int)) or isinstance(tracking, bool) or not str(tracking).strip():
             raise AmeexError("AMEEX response has no parcel code; reconcile in AMEEX before retrying")
         tracking = str(tracking)
