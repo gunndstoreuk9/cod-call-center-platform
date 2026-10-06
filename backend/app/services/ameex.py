@@ -74,6 +74,18 @@ def _request(integration: IntegrationConfig, method: str, path: str, payload: di
         ):
             detail = data.get("msg") or data.get("message") or "AMEEX rejected the request"
             raise AmeexError("AMEEX: " + _safe_error(detail, secrets)[:500])
+        if path == "/Delivery/Cities":
+            try:
+                _collection(data, "CITIES")
+            except AmeexError as exc:
+                parts = ["root=" + type(data).__name__]
+                if isinstance(data, dict):
+                    for key in ("cities", "CITIES", "data", "DATA"):
+                        parts.append(key + "=" + (type(data[key]).__name__ if key in data else "missing"))
+                    for key in ("type", "msg", "message"):
+                        if isinstance(data.get(key), (str, int, bool)):
+                            parts.append(key + "=" + _safe_error(data[key], secrets)[:200])
+                raise AmeexError("AMEEX Cities response: " + "; ".join(parts)) from exc
         return data
     except Exception as exc:
         raise AmeexError(_safe_error(exc, secrets)) from exc

@@ -17,6 +17,23 @@ def test_real_city_envelope():
     assert ameex._collection(payload, "CITIES") == list(payload["cities"].values())
 
 
+def test_city_response_diagnostic(monkeypatch):
+    secrets = {"client_id": "demo-id", "api_key": "test_demo", "webhook_secret": "secret"}
+    monkeypatch.setattr(ameex, "_settings", lambda integration: ({}, secrets))
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, method, url, headers, data):
+            return httpx.Response(200, json={"type": "warning", "msg": "Blocked test_demo", "data": None},
+                                  request=httpx.Request(method, url))
+    monkeypatch.setattr(ameex.httpx, "Client", FakeClient)
+    result = ameex.test_connection(None)
+    assert result["ok"] is False
+    assert "cities=missing" in result["message"] and "data=NoneType" in result["message"]
+    assert "msg=Blocked [redacted]" in result["message"]
+
+
 def test_api_error_and_trimmed_credentials(monkeypatch):
     secrets = {"client_id": " demo-id ", "api_key": " test_demo ", "webhook_secret": "signing-secret"}
     monkeypatch.setattr(ameex, "_settings", lambda integration: ({}, secrets))
