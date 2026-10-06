@@ -34,6 +34,52 @@ const emptyOzon = {
   cities_url: 'https://api.ozonexpress.ma/cities'
 }
 
+const emptyAmeex = {
+  name: 'AMEEX Morocco', store_id: '', client_id: '', api_key: '', webhook_secret: ''
+}
+
+function AmeexForm({ value, onChange, stores, editing = false, saving, error, onSubmit, onCancel, t }) {
+  return (
+    <form onSubmit={onSubmit}>
+      {error && <div className="error" role="alert">{error}</div>}
+      <div className="form-grid">
+        <div className="field">
+          <label htmlFor="ameex-name">{t('Connection Name')}</label>
+          <input id="ameex-name" required value={value.name} onChange={e => onChange({ ...value, name: e.target.value })} />
+        </div>
+        <div className="field">
+          <label htmlFor="ameex-store">{t('Platform Store')}</label>
+          <select id="ameex-store" required value={value.store_id} onChange={e => onChange({ ...value, store_id: e.target.value })}>
+            <option value="">{t('Select Store')}</option>
+            {stores.map(store => <option key={store.id} value={store.id}>{store.name}</option>)}
+          </select>
+        </div>
+        {[
+          ['client_id', 'AMEEX Client API ID'],
+          ['api_key', 'AMEEX API Key'],
+          ['webhook_secret', 'AMEEX Webhook Secret']
+        ].map(([key, label]) => (
+          <div className="field full" key={key}>
+            <label htmlFor={`ameex-${key}`}>{t(label)}</label>
+            <input id={`ameex-${key}`} required={!editing} type="password" autoComplete="new-password"
+              value={value[key]} placeholder={editing ? t('Leave blank to keep the saved value') : ''}
+              onChange={e => onChange({ ...value, [key]: e.target.value })} />
+          </div>
+        ))}
+        <div className="field full">
+          <small>{t('Copy the webhook secret from AMEEX Keys & Webhook. Use the same secret in both platforms.')}</small>
+          <small>{t('Start with a test_ key for sandbox. Use a live key for real shipments.')}</small>
+          <small>{t('Stored encrypted. It is never returned to the browser after save.')}</small>
+        </div>
+      </div>
+      <div className="form-actions">
+        <button type="button" className="btn secondary" disabled={saving} onClick={onCancel}>{t('Cancel')}</button>
+        <button className="btn" disabled={saving}>{saving ? t('Saving...') : t('Save AMEEX')}</button>
+      </div>
+    </form>
+  )
+}
+
 const emptySheets = {
   name: 'Google Sheets Leads',
   store_id: '',
@@ -45,6 +91,7 @@ const emptySheets = {
 function providerLabel(provider) {
   if (provider === 'GOOGLE_SHEETS') return 'Google Sheets'
   if (provider === 'OZON_EXPRESS') return 'Ozon Express'
+  if (provider === 'AMEEX') return 'AMEEX'
   return 'Digylog'
 }
 
@@ -60,6 +107,8 @@ export default function IntegrationsPage() {
 
   const [digy, setDigy] = useState(emptyDigylog)
   const [ozon, setOzon] = useState(emptyOzon)
+  const [ameex, setAmeex] = useState(emptyAmeex)
+  const [editAmeex, setEditAmeex] = useState(emptyAmeex)
   const [sheets, setSheets] = useState(emptySheets)
 
   const [editing, setEditing] = useState(null)
@@ -69,6 +118,7 @@ export default function IntegrationsPage() {
   const [script, setScript] = useState('')
   const [scriptOpen, setScriptOpen] = useState(false)
   const [webhook, setWebhook] = useState('')
+  const [webhookProvider, setWebhookProvider] = useState('')
 
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
@@ -98,6 +148,7 @@ export default function IntegrationsPage() {
           ...f,
           store_id: f.store_id || storeId
         }))
+        setAmeex(f => ({ ...f, store_id: f.store_id || storeId }))
         setSheets(f => ({
           ...f,
           store_id: f.store_id || storeId
@@ -241,6 +292,30 @@ export default function IntegrationsPage() {
     }
   }
 
+  const createAmeex = async e => {
+    e.preventDefault()
+    setSaving(true)
+    setError('')
+    try {
+      await api('/integrations', {
+        method: 'POST',
+        body: {
+          provider: 'AMEEX', name: ameex.name.trim(), store_id: ameex.store_id,
+          is_active: true,
+          secrets: { client_id: ameex.client_id.trim(), api_key: ameex.api_key.trim(), webhook_secret: ameex.webhook_secret.trim() }
+        }
+      })
+      setOpen(null)
+      setAmeex({ ...emptyAmeex, store_id: stores[0]?.id || '' })
+      flash(t('AMEEX integration saved. Click Test to validate credentials and sync cities.'))
+      await load()
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const createSheets = async e => {
     e.preventDefault()
 
@@ -341,6 +416,7 @@ export default function IntegrationsPage() {
       )
 
       setWebhook(r.webhook_url)
+      setWebhookProvider(row.provider)
       setScript('')
       setScriptOpen(true)
     } catch (e) {
@@ -357,6 +433,7 @@ export default function IntegrationsPage() {
       )
 
       setWebhook(r.webhook_url)
+      setWebhookProvider(row.provider)
       setScript(r.script)
       setScriptOpen(true)
     } catch (e) {
@@ -370,7 +447,9 @@ export default function IntegrationsPage() {
 
     const config = row.config || {}
 
-    if (row.provider === 'DIGYLOG') {
+    if (row.provider === 'AMEEX') {
+      setEditAmeex({ ...emptyAmeex, name: row.name || '', store_id: row.store_id || '' })
+    } else if (row.provider === 'DIGYLOG') {
       setEditDigy({
         name: row.name || '',
         store_id: row.store_id || '',
@@ -410,6 +489,7 @@ export default function IntegrationsPage() {
     if (saving) return
 
     setEditing(null)
+    setEditAmeex(emptyAmeex)
     setEditDigy(emptyDigylog)
     setEditSheets(emptySheets)
   }
@@ -423,7 +503,17 @@ export default function IntegrationsPage() {
     setError('')
 
     try {
-      if (editing.provider === 'DIGYLOG') {
+      if (editing.provider === 'AMEEX') {
+        const secrets = Object.fromEntries(['client_id', 'api_key', 'webhook_secret']
+          .filter(key => editAmeex[key].trim())
+          .map(key => [key, editAmeex[key].trim()]))
+        await api(`/integrations/${editing.id}`, {
+          method: 'PATCH',
+          body: { name: editAmeex.name.trim(), store_id: editAmeex.store_id, secrets }
+        })
+        setEditing(null)
+        setEditAmeex(emptyAmeex)
+      } else if (editing.provider === 'DIGYLOG') {
         const body = {
           name: editDigy.name,
           store_id: editDigy.store_id,
@@ -563,6 +653,10 @@ export default function IntegrationsPage() {
             {t('+ Connect Ozon Express')}
           </button>
 
+          <button className="btn" onClick={() => { setError(''); setOpen('ameex') }}>
+            {t('+ Connect AMEEX')}
+          </button>
+
           <button
             className="btn secondary"
             onClick={() => setOpen('sheets')}
@@ -611,7 +705,7 @@ export default function IntegrationsPage() {
                   <td colSpan="5">
                     <div className="empty">
                       {t(
-                        'No integration yet. Connect Digylog, Ozon Express or Google Sheets above.'
+                        'No integration yet. Connect Digylog, Ozon Express, AMEEX or Google Sheets above.'
                       )}
                     </div>
                   </td>
@@ -835,6 +929,17 @@ export default function IntegrationsPage() {
           </table>
         </div>
       </div>
+
+      <Modal open={open === 'ameex'} title="Connect AMEEX" wide
+        onClose={() => { if (!saving) { setOpen(null); setAmeex({ ...emptyAmeex, store_id: stores[0]?.id || '' }) } }}>
+        <AmeexForm value={ameex} onChange={setAmeex} stores={stores} saving={saving} error={error} t={t}
+          onSubmit={createAmeex} onCancel={() => { setOpen(null); setAmeex({ ...emptyAmeex, store_id: stores[0]?.id || '' }) }} />
+      </Modal>
+
+      <Modal open={editing?.provider === 'AMEEX'} title="Edit AMEEX" wide onClose={closeEdit}>
+        <AmeexForm value={editAmeex} onChange={setEditAmeex} stores={stores} editing saving={saving} error={error} t={t}
+          onSubmit={saveEdit} onCancel={closeEdit} />
+      </Modal>
 
       {/* CREATE DIGYLOG */}
       <Modal
@@ -1764,6 +1869,9 @@ export default function IntegrationsPage() {
         }
         wide
       >
+        {webhookProvider === 'AMEEX' && (
+          <p>{t('Paste this URL into AMEEX Keys & Webhook and enable signing with the same webhook secret saved here.')}</p>
+        )}
         <div className="field full">
           <label>
             {t(

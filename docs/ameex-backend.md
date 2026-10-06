@@ -1,10 +1,12 @@
 # AMEEX backend integration
 
-The backend supports `AMEEX` through existing integration configuration and delivery tables. No database migration or frontend change is included. Implementation follows the API specification supplied on 6 October 2026.
+The backend supports `AMEEX` through existing integration configuration and delivery tables. No database migration is needed. The companion frontend provides AMEEX connection settings and single-order dispatch. Implementation follows the API specification supplied on 6 October 2026.
 
 ## Configure in the backend
 
-Use an OWNER/ADMIN session in `/docs`, or the existing authenticated API client:
+Open Admin → Integrations → Connect AMEEX to enter the connection name, store, Client API ID, API Key and webhook secret. Existing connections have Edit, Test and Webhook actions. Saved credentials are not shown; leave credential fields blank when editing to keep their saved values.
+
+Alternatively, use an OWNER/ADMIN session in `/docs`, or the existing authenticated API client:
 
 ```json
 POST /api/v1/integrations
@@ -28,7 +30,7 @@ Enter real credentials only in the platform's authenticated settings/API. Creden
 4. Dispatch a confirmed test order using an endpoint below. Confirm its code in AMEEX and exercise a sandbox status callback.
 5. Configure a separate live integration, disable the sandbox integration before default dispatch, and use live credentials after sandbox validation.
 
-Set PUBLIC_API_BASE_URL to the externally reachable backend origin before copying the webhook URL. Backend Swagger is `/docs`; existing admin UI does not yet have an AMEEX connection form or dispatch button.
+Set PUBLIC_API_BASE_URL to the externally reachable backend origin before copying the webhook URL. Backend Swagger is `/docs`. Confirmed orders can be sent with Send AMEEX in Admin → Orders or Send to AMEEX in the agent workspace. Only configure one active AMEEX connection per store for these default-dispatch buttons.
 
 ## Platform endpoints
 

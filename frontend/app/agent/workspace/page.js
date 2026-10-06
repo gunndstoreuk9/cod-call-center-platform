@@ -547,6 +547,36 @@ export default function WorkspacePage() {
     }
   }
 
+  const dispatchAmeex = async order => {
+    setDispatchingId(order.id)
+    setError('')
+    setNotice('')
+
+    try {
+      const result = await api(
+        `/integrations/ameex/dispatch/${order.id}`,
+        { method: 'POST' }
+      )
+
+      setNotice(
+        `${L(
+          'Sent to AMEEX',
+          'تم الإرسال إلى AMEEX'
+        )}${
+          result.tracking_number
+            ? ` · ${result.tracking_number}`
+            : ''
+        }`
+      )
+
+      await loadBoard(bucket, productId)
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setDispatchingId(null)
+    }
+  }
+
   const bulkDispatch = async () => {
     if (!selectedIds.length) return
 
@@ -1281,6 +1311,22 @@ export default function WorkspacePage() {
                           : L(
                               'Send to Ozon Express',
                               'إرسال إلى Ozon Express'
+                            )}
+                      </button>
+                    )}
+
+                    {ready && (
+                      <button
+                        type="button"
+                        className="tw-dispatch-btn"
+                        disabled={dispatchingId === order.id}
+                        onClick={() => dispatchAmeex(order)}
+                      >
+                        {dispatchingId === order.id
+                          ? L('Sending...', 'جاري الإرسال...')
+                          : L(
+                              'Send to AMEEX',
+                              'إرسال إلى AMEEX'
                             )}
                       </button>
                     )}
