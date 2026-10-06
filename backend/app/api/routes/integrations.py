@@ -22,8 +22,10 @@ from app.services.ozon_express import (
     test_connection as test_ozon_connection,
 )
 
+from app.services import ameex
+
 router = APIRouter(prefix="/integrations", tags=["integrations"])
-SUPPORTED_PROVIDERS = {"DIGYLOG", "GOOGLE_SHEETS", "OZON_EXPRESS"}
+SUPPORTED_PROVIDERS = {"DIGYLOG", "GOOGLE_SHEETS", "OZON_EXPRESS", "AMEEX"}
 
 
 def _provider(value: str) -> str:
@@ -42,6 +44,8 @@ def _secret_values(row: IntegrationConfig) -> dict:
 
 def _public_webhook(row: IntegrationConfig) -> str:
     base = settings.public_api_base_url.rstrip("/")
+    if row.provider == "AMEEX":
+        return f"{base}/api/v1/integrations/ameex/{row.id}/webhook"
     if row.provider == "DIGYLOG":
         return f"{base}/api/v1/integrations/digylog/{row.id}/webhook"
     if row.provider == "GOOGLE_SHEETS":
@@ -118,6 +122,9 @@ def create_integration(
     if provider == "OZON_EXPRESS" and not payload.store_id:
         raise HTTPException(400, "Ozon Express integration requires a store")
 
+    if provider == "AMEEX" and not payload.store_id:
+        raise HTTPException(400, "AMEEX integration requires a store")
+
     secret_values = {k: v for k, v in (payload.secrets or {}).items() if v not in (None, "")}
     secret_values.setdefault("webhook_token", pysecrets.token_urlsafe(32))
     if provider == "DIGYLOG" and not secret_values.get("api_token"):
@@ -127,6 +134,9 @@ def create_integration(
         or not secret_values.get("api_key")
     ):
         raise HTTPException(400, "Ozon Express Client ID and API Key are required")
+
+    if provider == "AMEEX" and any(not secret_values.get(k) for k in ("client_id", "api_key", "webhook_secret")):
+        raise HTTPException(400, "AMEEX Client ID, API Key and webhook secret are required")
 
     config = dict(payload.config or {})
     if provider == "DIGYLOG":
@@ -142,6 +152,8 @@ def create_integration(
     elif provider == "GOOGLE_SHEETS":
         config.setdefault("sheet_name", "Sheet1")
         config.setdefault("auto_assign", True)
+    elif provider == "AMEEX":
+        config["api_base_url"] = ameex.BASE_URL
     else:
         config.setdefault("api_base_url", "https://api.ozonexpress.ma")
         config.setdefault(
@@ -188,8 +200,8 @@ def update_integration(
             raise HTTPException(400, "Invalid store")
         if row.provider == "GOOGLE_SHEETS" and not store_id:
             raise HTTPException(400, "Google Sheets integration requires a store")
-        if row.provider == "OZON_EXPRESS" and not store_id:
-            raise HTTPException(400, "Ozon Express integration requires a store")
+        if row.provider in {"OZON_EXPRESS", "AMEEX"} and not store_id:
+            raise HTTPException(400, f"{row.provider} integration requires a store")
         row.store_id = store_id
     if "name" in updates and updates["name"] is not None:
         row.name = str(updates.pop("name")).strip()
@@ -262,6 +274,8 @@ def webhook_config(
     token = str(values.get("webhook_token") or "")
     if not token:
         raise HTTPException(500, "Webhook token is missing")
+    if row.provider == "AMEEX":
+        return {"webhook_url": _public_webhook(row), "provider": row.provider, "authentication": "X-Ameex-Signature"}
     return {"webhook_url": f"{_public_webhook(row)}?token={token}", "provider": row.provider}
 
 
@@ -287,7 +301,14 @@ def test_integration(
     user: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
     row = _integration_or_404(db, integration_id)
-    if row.provider == "DIGYLOG":
+    if row.provider == "AMEEX":
+        result = ameex.test_connection(row)
+        if result.get("ok"):
+            try:
+                result["cities_synced"] = ameex.sync_cities(db, row)
+            except ameex.AmeexError as exc:
+                result = {"ok": False, "message": str(exc)}
+    elif row.provider == "DIGYLOG":
         result = test_connection(row)
     elif row.provider == "OZON_EXPRESS":
         result = test_ozon_connection(row)
@@ -1142,3 +1163,176 @@ def dispatch_to_default_ozon_express(
     except OzonExpressError as exc:
         db.commit()
         raise HTTPException(502, str(exc)) from exc
+
+
+@router.post("/ameex/{integration_id}/dispatch/{order_id}")
+def dispatch_to_ameex(
+    integration_id: str,
+    order_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(current_user),
+):
+    if user.role not in {"OWNER", "ADMIN", "SUPERVISOR", "AGENT"}:
+        raise HTTPException(403, "Insufficient permissions")
+
+    row = _integration_or_404(db, integration_id, "AMEEX")
+    if not row.is_active:
+        raise HTTPException(409, "AMEEX integration is disabled")
+
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+
+    if user.role == "AGENT":
+        if order.assigned_agent_id != user.id:
+            raise HTTPException(403, "This order is not assigned to you")
+        allowed_product = (
+            db.query(AgentProduct)
+            .filter(
+                AgentProduct.agent_id == user.id,
+                AgentProduct.product_id == order.product_id,
+            )
+            .first()
+        )
+        if not allowed_product:
+            raise HTTPException(403, "You no longer have access to this product")
+
+    if row.store_id and row.store_id != order.store_id:
+        raise HTTPException(
+            400,
+            "This AMEEX integration is linked to a different store",
+        )
+
+    try:
+        shipment = ameex.dispatch_order(db, row, order)
+        log_action(
+            db,
+            user_id=user.id,
+            action="ORDER_DISPATCHED_AMEEX",
+            entity_type="ORDER",
+            entity_id=order.id,
+            after={
+                "integration_id": row.id,
+                "tracking": shipment.tracking_number,
+            },
+        )
+        db.commit()
+        db.refresh(shipment)
+        return {
+            "ok": True,
+            "shipment_id": shipment.id,
+            "tracking_number": shipment.tracking_number,
+            "delivery_status": order.delivery_status,
+        }
+    except ameex.AmeexError as exc:
+        db.commit()
+        raise HTTPException(502, str(exc)) from exc
+
+
+
+
+@router.post("/ameex/dispatch/{order_id}")
+def dispatch_to_default_ameex(
+    order_id: str, db: Session = Depends(get_db), user: User = Depends(current_user),
+):
+    if user.role not in {"OWNER", "ADMIN", "SUPERVISOR", "AGENT"}:
+        raise HTTPException(403, "Insufficient permissions")
+    order = db.query(Order).filter(Order.id == order_id).first()
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if user.role == "AGENT" and order.assigned_agent_id != user.id:
+        raise HTTPException(403, "This order is not assigned to you")
+    rows = db.query(IntegrationConfig).filter(
+        IntegrationConfig.provider == "AMEEX", IntegrationConfig.is_active.is_(True),
+        IntegrationConfig.store_id == order.store_id,
+    ).all()
+    if len(rows) != 1:
+        raise HTTPException(409, "Configure exactly one active AMEEX integration or dispatch with an explicit integration ID")
+    return dispatch_to_ameex(rows[0].id, order_id, db, user)
+
+
+@router.post("/ameex/{integration_id}/webhook")
+async def ameex_webhook(integration_id: str, request: Request, db: Session = Depends(get_db)):
+    import hashlib
+    import hmac
+    import re
+    import time
+    from urllib.parse import parse_qsl
+
+    row = _integration_or_404(db, integration_id, "AMEEX")
+    if not row.is_active:
+        raise HTTPException(409, "Integration is disabled")
+    secret = str(_secret_values(row).get("webhook_secret") or "")
+    raw = await request.body()
+    match = re.fullmatch(r"t=(\d+),v1=([0-9a-f]{64})", request.headers.get("X-Ameex-Signature", ""))
+    if not secret or not match:
+        raise HTTPException(401, "Missing or invalid AMEEX signature")
+    timestamp, signature = match.groups()
+    if abs(time.time() - int(timestamp)) > 300:
+        raise HTTPException(401, "Expired AMEEX signature")
+    expected = hmac.new(secret.encode(), timestamp.encode() + b"." + raw, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        raise HTTPException(401, "Invalid AMEEX signature")
+    if request.headers.get("content-type", "").split(";")[0].strip().lower() != "application/x-www-form-urlencoded":
+        raise HTTPException(415, "AMEEX webhook must be form-encoded")
+    try:
+        pairs = parse_qsl(raw.decode("utf-8"), keep_blank_values=True, max_num_fields=50)
+        if len({key for key, _ in pairs}) != len(pairs):
+            raise ValueError("Duplicate fields")
+        body = dict(pairs)
+        result = ameex.apply_webhook(db, row, body)
+    except (ValueError, ameex.AmeexError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return result
+
+
+def _active_ameex(db, integration_id):
+    row = _integration_or_404(db, integration_id, "AMEEX")
+    if not row.is_active:
+        raise HTTPException(409, "Integration is disabled")
+    return row
+
+
+def _ameex_read(db, integration_id, operation):
+    row = _active_ameex(db, integration_id)
+    try:
+        return operation(row)
+    except ameex.AmeexError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+
+@router.get("/ameex/{integration_id}/statuses")
+def ameex_statuses(integration_id: str, db: Session = Depends(get_db),
+                   _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR"))):
+    return _ameex_read(db, integration_id, ameex.get_statuses)
+
+
+@router.post("/ameex/{integration_id}/sync-cities")
+def ameex_sync_cities(integration_id: str, db: Session = Depends(get_db),
+                      _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR"))):
+    count = _ameex_read(db, integration_id, lambda row: ameex.sync_cities(db, row))
+    db.commit()
+    return {"ok": True, "cities_synced": count}
+
+
+@router.get("/ameex/{integration_id}/tracking/{code}")
+def ameex_tracking(integration_id: str, code: str, db: Session = Depends(get_db),
+                   _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR"))):
+    return _ameex_read(db, integration_id, lambda row: ameex.get_tracking(row, code))
+
+
+@router.post("/ameex/{integration_id}/mass-tracking")
+def ameex_mass_tracking(integration_id: str, codes: list[str], db: Session = Depends(get_db),
+                        _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR"))):
+    if not 1 <= len(codes) <= 100 or any(not code.strip() or "," in code for code in codes):
+        raise HTTPException(400, "Provide 1–100 parcel codes without commas")
+    return _ameex_read(db, integration_id, lambda row: ameex.bulk_lookup(row, codes))
+
+
+@router.post("/ameex/{integration_id}/mass-info")
+def ameex_mass_info(integration_id: str, codes: list[str], db: Session = Depends(get_db),
+                    _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR"))):
+    if not 1 <= len(codes) <= 100 or any(not code.strip() or "," in code for code in codes):
+        raise HTTPException(400, "Provide 1–100 parcel codes without commas")
+    return _ameex_read(db, integration_id, lambda row: ameex.bulk_lookup(row, codes, info=True))
