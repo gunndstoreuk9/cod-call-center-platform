@@ -3,9 +3,38 @@ import hmac
 import time
 from urllib.parse import urlencode
 import httpx
+import pytest
 from app.core.db import SessionLocal
 from app.models import Order, DeliveryShipment
 from app.services import ameex
+
+
+def test_real_city_envelope():
+    payload = {"type": "success", "msg": "", "cities": {
+        "1": {"id": 1, "name": "Marrakech"},
+        "2": {"id": 2, "name": "Meknes"},
+    }, "sandbox": 1}
+    assert ameex._collection(payload, "CITIES") == list(payload["cities"].values())
+
+
+def test_api_error_and_trimmed_credentials(monkeypatch):
+    secrets = {"client_id": " demo-id ", "api_key": " test_demo ", "webhook_secret": "signing-secret"}
+    monkeypatch.setattr(ameex, "_settings", lambda integration: ({}, secrets))
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def request(self, method, url, headers, data):
+            assert headers["C-Api-Id"] == "demo-id"
+            assert headers["C-Api-Key"] == "test_demo"
+            return httpx.Response(200, json={"type": "error", "msg": "Invalid key test_demo demo-id signing-secret"},
+                                  request=httpx.Request(method, url))
+    monkeypatch.setattr(ameex.httpx, "Client", FakeClient)
+    with pytest.raises(ameex.AmeexError) as error:
+        ameex._request(None, "GET", "/Delivery/Cities")
+    message = str(error.value)
+    assert message.startswith("AMEEX: Invalid key") and message.count("[redacted]") == 3
+    assert all(secret.strip() not in message for secret in secrets.values())
 
 
 def setup(client):

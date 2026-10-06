@@ -61,15 +61,19 @@ def _request(integration: IntegrationConfig, method: str, path: str, payload: di
     _, secrets = _settings(integration)
     if not secrets.get("client_id") or not secrets.get("api_key"):
         raise AmeexError("AMEEX Client ID and API Key are required")
-    headers = {"Accept": "application/json", "C-Api-Id": str(secrets["client_id"]),
-               "C-Api-Key": str(secrets["api_key"])}
+    headers = {"Accept": "application/json", "C-Api-Id": str(secrets["client_id"]).strip(),
+               "C-Api-Key": str(secrets["api_key"]).strip()}
     try:
         with httpx.Client(timeout=25, follow_redirects=False) as client:
             response = client.request(method, BASE_URL + path, headers=headers, data=payload)
         response.raise_for_status()
         data = response.json()
-        if isinstance(data, dict) and (data.get("success") is False or data.get("SUCCESS") is False):
-            raise AmeexError("AMEEX rejected the request")
+        if isinstance(data, dict) and (
+            data.get("success") is False or data.get("SUCCESS") is False
+            or str(data.get("type", "")).lower() in {"error", "failed", "failure"}
+        ):
+            detail = data.get("msg") or data.get("message") or "AMEEX rejected the request"
+            raise AmeexError("AMEEX: " + _safe_error(detail, secrets)[:500])
         return data
     except Exception as exc:
         raise AmeexError(_safe_error(exc, secrets)) from exc
@@ -90,10 +94,11 @@ def _collection(data, name):
 
 def _safe_error(value: object, secrets: dict) -> str:
     message = str(value)
-    for key in ("client_id", "api_key"):
+    for key in ("client_id", "api_key", "webhook_secret"):
         secret = str(secrets.get(key) or "")
-        if secret:
-            message = message.replace(secret, "[redacted]").replace(quote(secret, safe=""), "[redacted]")
+        for value in (secret, secret.strip()):
+            if value:
+                message = message.replace(value, "[redacted]").replace(quote(value, safe=""), "[redacted]")
     return message
 
 
