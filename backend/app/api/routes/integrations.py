@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import logging
 import secrets as pysecrets
+from pydantic import ValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -9,7 +13,7 @@ from app.core.db import get_db
 from app.core.deps import current_user, require_roles
 from app.core.time import utcnow
 from app.models import AgentProduct, DeliveryShipment, IntegrationConfig, IntegrationEvent, Order, Store, User
-from app.schemas import IntegrationCreate, IntegrationOut, IntegrationUpdate, SheetWebhookBatch
+from app.schemas import IntegrationCreate, IntegrationOut, IntegrationUpdate, SheetWebhookBatch, SheetWebhookOrder
 from app.services.audit import log_action
 from app.services.digylog import DigylogError, apply_webhook, dispatch_order, test_connection
 from app.services.google_sheets import apps_script, import_sheet_order
@@ -24,6 +28,8 @@ from app.services.ozon_express import (
 
 from app.services import ameex
 
+logger = logging.getLogger(__name__)
+MAX_SHEET_BATCH = 500
 router = APIRouter(prefix="/integrations", tags=["integrations"])
 SUPPORTED_PROVIDERS = {"DIGYLOG", "GOOGLE_SHEETS", "OZON_EXPRESS", "AMEEX"}
 
@@ -346,6 +352,75 @@ def list_events(
     return [{c.name: getattr(x, c.name) for c in x.__table__.columns} for x in rows]
 
 
+@router.get("/google-sheets/{integration_id}/sync-status")
+def google_sheets_sync_status(
+    integration_id: str,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
+):
+    """Read-only health view: last successful import, per-day imported counts and the latest failure reasons."""
+    from datetime import timedelta, timezone
+    from zoneinfo import ZoneInfo
+    row = _integration_or_404(db, integration_id, "GOOGLE_SHEETS")
+    tz = ZoneInfo(settings.timezone)
+    since = utcnow() - timedelta(days=8)
+    created = [c for (c,) in db.query(Order.created_at).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id, Order.created_at >= since).all()]
+    per_day: dict[str, int] = {}
+    for c in created:
+        key = c.astimezone(tz).date().isoformat()
+        per_day[key] = per_day.get(key, 0) + 1
+    last_import = db.query(func.max(Order.created_at)).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id).scalar()
+    last_batch = (
+        db.query(IntegrationEvent)
+        .filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY")
+        .order_by(IntegrationEvent.created_at.desc()).first()
+    )
+    feeds: dict[str, dict] = {}
+    for ev in (
+        db.query(IntegrationEvent)
+        .filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY", IntegrationEvent.created_at >= utcnow() - timedelta(days=7))
+        .order_by(IntegrationEvent.created_at.asc()).limit(5000).all()
+    ):
+        c = (ev.payload or {}).get("client") or {}
+        key = f"{c.get('spreadsheet', 'legacy-script')}/{c.get('tab', '?')}"
+        f = feeds.setdefault(key, {"batches": 0, "inserted": 0, "rejected": 0, "last_seen": None, "version": c.get("version")})
+        f["batches"] += 1
+        f["inserted"] += int((ev.payload or {}).get("inserted") or 0)
+        f["rejected"] += int((ev.payload or {}).get("rejected") or 0)
+        f["last_seen"] = ev.created_at
+    cfg = row.config or {}
+    alerts: list[str] = []
+    now = utcnow()
+
+    def aware(dt):
+        return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+    if not row.is_active:
+        alerts.append("Integration is disabled")
+    if cfg.get("sheet_name") != "orders":
+        alerts.append("Configured sheet_name is not 'orders'")
+    if "legacy-script/?" in feeds:
+        alerts.append("A legacy script (no feed identity) is still posting; replace it with the v2 script")
+    live = [k for k, f in feeds.items() if f["last_seen"] and (now - aware(f["last_seen"])).total_seconds() < 3600]
+    if len(live) > 1:
+        alerts.append(f"{len(live)} different feeds posted in the last hour: {', '.join(sorted(live))}")
+    if last_import is not None and (now - aware(last_import)).total_seconds() > 24 * 3600:
+        alerts.append("No lead imported for over 24 hours")
+    if last_batch and (last_batch.payload or {}).get("rejected", 0) > 50:
+        alerts.append(f"Last batch rejected {(last_batch.payload or {}).get('rejected')} rows (see failure_reasons)")
+    return {
+        "integration_id": row.id,
+        "sheet_name": cfg.get("sheet_name"),
+        "sheet_name_warning": None if cfg.get("sheet_name") == "orders" else "Expected source tab is 'orders'",
+        "active": row.is_active,
+        "last_successful_import_at": last_import,
+        "imported_per_day": dict(sorted(per_day.items())),
+        "last_batch": None if not last_batch else {"at": last_batch.created_at, **(last_batch.payload or {})},
+        "feeds_last_7_days": feeds,
+        "alerts": alerts,
+    }
+
+
 @router.get("/google-sheets/{integration_id}/script")
 def google_sheets_script(
     integration_id: str,
@@ -365,31 +440,74 @@ def google_sheets_script(
 def google_sheets_webhook(
     integration_id: str,
     payload: SheetWebhookBatch,
+    request: Request,
     token: str | None = Query(default=None),
+    dry_run: bool = Query(default=False),
     db: Session = Depends(get_db),
 ):
+    """Idempotent lead import. Every row is validated and imported independently.
+
+    dry_run=true reports what WOULD happen (inserted/duplicate/failed) without writing anything.
+    """
     row = _integration_or_404(db, integration_id, "GOOGLE_SHEETS")
     if not row.is_active:
         raise HTTPException(409, "Integration is disabled")
-    _verify_webhook_token(row, token)
+    # Header preferred: query strings end up in access logs. ?token= stays supported for old scripts.
+    _verify_webhook_token(row, request.headers.get("X-Webhook-Token") or token)
+    if len(payload.orders) > MAX_SHEET_BATCH:
+        raise HTTPException(413, f"Batch too large (max {MAX_SHEET_BATCH} rows per request)")
     results = []
-    for item in payload.orders:
+    for raw in payload.orders:
+        row_number = raw.get("row_number") if isinstance(raw.get("row_number"), int) else None
+        sku = str(raw.get("sku") or "")[:60]
         try:
-            with db.begin_nested():
+            item = SheetWebhookOrder.model_validate(raw)
+        except ValidationError as exc:
+            msg = "Validation: " + "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())[:400]
+            results.append({"status": "ERROR", "outcome": "REJECTED", "error": msg, "row_number": row_number})
+            continue
+        try:
+            with db.begin_nested() as sp:
                 result = import_sheet_order(db, row, item.model_dump())
-                if result.get("status") == "ERROR":
-                    db.add(IntegrationEvent(
-                        integration_id=row.id, provider="GOOGLE_SHEETS", direction="INBOUND",
-                        event_type="ORDER_IMPORT", status="FAILED",
-                        payload={"row_number": item.row_number, "sku": item.sku},
-                        error=str(result.get("error") or "Import rejected"),
-                    ))
+                if dry_run:
+                    sp.rollback()
+                    if result.get("outcome") == "INSERTED":
+                        result = {**result, "outcome": "WOULD_INSERT", "order_id": None, "order_number": None}
             results.append(result)
         except Exception as exc:
-            results.append({"status": "ERROR", "error": str(exc), "row_number": item.row_number})
-            db.add(IntegrationEvent(integration_id=row.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="ORDER_IMPORT", status="FAILED", payload={"row_number": item.row_number, "sku": item.sku}, error=str(exc)))
-    db.commit()
-    return {"ok": True, "results": results}
+            logger.exception("google_sheets_import_row_failed integration=%s row=%s", row.id, item.row_number)
+            results.append({"status": "ERROR", "outcome": "FAILED", "error": str(exc)[:400], "row_number": item.row_number})
+    outcomes = [r.get("outcome") for r in results]
+    summary = {
+        "received": len(payload.orders),
+        "inserted": outcomes.count("INSERTED"),
+        "would_insert": outcomes.count("WOULD_INSERT"),
+        "duplicate": outcomes.count("DUPLICATE"),
+        "failed": outcomes.count("FAILED") + outcomes.count("REJECTED"),   # everything not imported
+        "rejected": outcomes.count("REJECTED"),                            # permanent: needs a data/config fix
+        "transient_failed": outcomes.count("FAILED"),                      # worth retrying automatically
+        "id_collisions": sum(1 for r in results if r.get("collision")),
+        "dry_run": dry_run,
+        "sheet_name": (row.config or {}).get("sheet_name"),
+    }
+    # One aggregated record per batch instead of one event per failed row: the old per-row events
+    # reached ~570k/day because failing rows are re-sent every minute.
+    reasons: dict[str, dict] = {}
+    for r in results:
+        if r.get("outcome") in ("FAILED", "REJECTED"):
+            entry = reasons.setdefault(str(r.get("error"))[:120], {"count": 0, "sample_rows": []})
+            entry["count"] += 1
+            if len(entry["sample_rows"]) < 10:
+                entry["sample_rows"].append(r.get("row_number"))
+    summary["failure_reasons"] = reasons
+    if payload.client:
+        summary["client"] = {k: str(payload.client.get(k) or "")[:40] for k in ("spreadsheet", "tab", "version")}
+    logger.info("google_sheets_sync integration=%s %s", row.id, json.dumps(summary))
+    if not dry_run:
+        if summary["inserted"] or summary["failed"] or summary["id_collisions"] or payload.client:
+            db.add(IntegrationEvent(integration_id=row.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="BATCH_SUMMARY", status="FAILED" if summary["failed"] else "SUCCESS", payload=summary, error=None))
+        db.commit()
+    return {"ok": summary["failed"] == 0, "summary": summary, "results": results}
 
 
 @router.api_route("/digylog/{integration_id}/webhook", methods=["POST", "PUT"])

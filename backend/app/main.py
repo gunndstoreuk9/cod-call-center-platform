@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,6 +11,19 @@ from app.core.config import settings
 from app.services.demo_auto_scheduler import (
     demo_auto_scheduler_loop,
 )
+
+
+class _RedactTokens(logging.Filter):
+    """Keep ?token=... webhook secrets out of uvicorn access logs."""
+    _pattern = re.compile(r"([?&](?:token|secret)=)[^&\s\"']+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.args = tuple(self._pattern.sub(r"\1[REDACTED]", a) if isinstance(a, str) else a for a in (record.args or ()))
+        record.msg = self._pattern.sub(r"\1[REDACTED]", record.msg) if isinstance(record.msg, str) else record.msg
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_RedactTokens())
 
 
 @asynccontextmanager

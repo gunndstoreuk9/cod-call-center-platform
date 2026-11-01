@@ -326,3 +326,273 @@ def test_ozon_express_dispatch_builds_correct_payload_and_saves_tracking(client,
     )
 
     assert 'private-ozon-key' not in dispatch_r.text
+
+
+def test_google_sheets_batch_isolation_dry_run_and_idempotency(client):
+    store = client.get('/api/v1/stores').json()[0]
+    sku = 'SHEETS-ISO-1'
+    r = client.post('/api/v1/products', json={
+        'store_id': store['id'], 'name': 'Iso Product', 'sku': sku,
+        'selling_price': 100, 'currency': 'MAD', 'commission_per_confirmation': 5, 'offers': []
+    })
+    assert r.status_code == 200, r.text
+    integ = client.post('/api/v1/integrations', json={
+        'provider': 'GOOGLE_SHEETS', 'name': 'Iso Sheet', 'store_id': store['id'],
+        'config': {'sheet_name': 'orders', 'auto_assign': False}, 'secrets': {}
+    }).json()
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()
+    token = parse_qs(urlparse(script['webhook_url']).query)['token'][0]
+    assert 'SOURCE_SHEET_NAME = "orders"' in script['script']
+    assert 'resendAllRowsToCallCenter' in script['script']
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook?token={token}"
+    rows = [
+        {'row_number': 2, 'sku': sku, 'customer_name': 'Iso A', 'phone': '0611111111', 'external_order_id': 'iso-1'},
+        {'row_number': 3, 'sku': sku, 'customer_name': 'Iso B', 'phone': '0622222222', 'quantity': 0, 'external_order_id': 'iso-2'},  # invalid
+        {'row_number': 4, 'sku': 'NOPE', 'customer_name': 'Iso C', 'phone': '0633333333', 'external_order_id': 'iso-3'},  # unknown SKU
+        {'row_number': 5, 'sku': sku, 'customer_name': 'Iso D', 'phone': '0644444444', 'external_order_id': 'iso-4'},
+    ]
+    count = lambda: len(client.get('/api/v1/orders?search=Iso').json())
+    before = count()
+
+    dry = client.post(url + '&dry_run=true', json={'orders': rows}).json()
+    assert dry['summary']['would_insert'] == 2 and dry['summary']['failed'] == 2
+    assert count() == before  # dry run writes nothing
+
+    live = client.post(url, json={'orders': rows}).json()
+    assert live['summary'] == {**live['summary'], 'received': 4, 'inserted': 2, 'duplicate': 0, 'failed': 2}
+    assert count() == before + 2  # bad rows did not block good rows
+
+    again = client.post(url, json={'orders': rows}).json()
+    assert again['summary']['inserted'] == 0 and again['summary']['duplicate'] == 2
+    assert count() == before + 2  # idempotent resend
+    assert 'token' not in str(live['summary'])
+
+
+def test_google_sheets_header_token_long_values_and_no_event_flood(client):
+    from app.core.db import SessionLocal
+    from app.models import IntegrationEvent
+    store = client.get('/api/v1/stores').json()[0]
+    sku = 'SHEETS-HDR-1'
+    assert client.post('/api/v1/products', json={'store_id': store['id'], 'name': 'Hdr', 'sku': sku, 'selling_price': 50, 'currency': 'MAD', 'commission_per_confirmation': 1, 'offers': []}).status_code == 200
+    integ = client.post('/api/v1/integrations', json={'provider': 'GOOGLE_SHEETS', 'name': 'Hdr', 'store_id': store['id'], 'config': {'sheet_name': 'orders', 'auto_assign': False}, 'secrets': {}}).json()
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()
+    token = parse_qs(urlparse(script['webhook_url']).query)['token'][0]
+    assert 'X-Webhook-Token' in script['script']
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook"
+    assert client.post(url, json={'orders': []}).status_code == 401
+    assert client.post(url, json={'orders': []}, headers={'X-Webhook-Token': 'wrong'}).status_code == 401
+    body = {'orders': [
+        {'row_number': 2, 'sku': sku, 'customer_name': 'Long City', 'phone': '0655555555', 'city': 'X' * 300, 'external_order_id': 'hdr-1'},
+        {'row_number': 3, 'sku': '', 'customer_name': 'No Sku', 'phone': '0666666666', 'external_order_id': 'hdr-2'},
+    ]}
+    for _ in range(3):
+        res = client.post(url, json=body, headers={'X-Webhook-Token': token}).json()
+    assert res['summary']['duplicate'] == 1 and res['summary']['failed'] == 1
+    assert res['summary']['failure_reasons']['Product SKU not found: (empty)']['sample_rows'] == [3]
+    with SessionLocal() as db:
+        failed_events = db.query(IntegrationEvent).filter(IntegrationEvent.integration_id == integ['id'], IntegrationEvent.status == 'FAILED').count()
+    assert failed_events == 3  # one BATCH_SUMMARY per batch, not one per failing row
+
+
+def _sheet_setup(client, skus=('SHEETS-C1',), sheet_name='orders', extra_config=None):
+    store = client.get('/api/v1/stores').json()[0]
+    prods = {}
+    for sku in skus:
+        r = client.post('/api/v1/products', json={'store_id': store['id'], 'name': sku, 'sku': sku, 'selling_price': 100, 'currency': 'MAD', 'commission_per_confirmation': 1, 'offers': []})
+        assert r.status_code == 200, r.text
+        prods[sku] = r.json()
+    integ = client.post('/api/v1/integrations', json={'provider': 'GOOGLE_SHEETS', 'name': 'Reg ' + skus[0], 'store_id': store['id'], 'config': {'sheet_name': sheet_name, 'auto_assign': False, **(extra_config or {})}, 'secrets': {}}).json()
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()
+    token = parse_qs(urlparse(script['webhook_url']).query)['token'][0]
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook"
+    send = lambda orders, **kw: client.post(url + ('?dry_run=true' if kw.get('dry') else ''), json={'orders': orders}, headers={'X-Webhook-Token': token}).json()
+    return integ, send
+
+
+def test_sheet_id_collision_is_imported_not_dropped_and_stays_idempotent(client):
+    integ, send = _sheet_setup(client, ('SHEETS-C1', 'SHEETS-C2'))
+    a = {'row_number': 2, 'sku': 'SHEETS-C1', 'customer_name': 'First', 'phone': '0671000001', 'external_order_id': 'COLL-7'}
+    assert send([a])['results'][0]['outcome'] == 'INSERTED'
+    # same id, different customer (re-used id / second feed): previously silently dropped as a "duplicate"
+    b = {**a, 'row_number': 9, 'customer_name': 'Second', 'phone': '0671000002'}
+    res = send([b])['results'][0]
+    assert res['outcome'] == 'INSERTED' and res['collision'] is True
+    # same id + same phone, different SKU (multi-line order)
+    c = {**a, 'row_number': 3, 'sku': 'SHEETS-C2'}
+    assert send([c])['results'][0]['outcome'] == 'INSERTED'
+    # everything re-sent -> only true duplicates, nothing new
+    again = send([a, b, c])
+    assert [r['outcome'] for r in again['results']] == ['DUPLICATE'] * 3
+    assert again['summary']['inserted'] == 0
+    # row position moved (sheet sorted): still the same lead
+    assert send([{**a, 'row_number': 500}])['results'][0]['outcome'] == 'DUPLICATE'
+
+
+def test_sheet_blank_order_id_uses_stable_fingerprint_not_row_position(client):
+    integ, send = _sheet_setup(client, ('SHEETS-F1',))
+    lead = {'row_number': 5, 'sku': 'SHEETS-F1', 'customer_name': 'No Id', 'phone': '0672000001', 'quantity': 2, 'total_price': 150, 'lead_date': '2026-11-01'}
+    first = send([lead])['results'][0]
+    assert first['outcome'] == 'INSERTED'
+    # different row (sheet re-sorted / row reused by ANOTHER lead must not collide)
+    assert send([{**lead, 'row_number': 77}])['results'][0]['outcome'] == 'DUPLICATE'
+    other = {**lead, 'customer_name': 'Different', 'phone': '0672000002'}   # another lead at the old row position
+    assert send([{**other, 'row_number': 5}])['results'][0]['outcome'] == 'INSERTED'
+    # legacy row-position id from the old script: same phone => duplicate, new phone => insert
+    legacy = {**lead, 'external_order_id': 'sheet:SSID:orders:5'}
+    assert send([legacy])['results'][0]['outcome'] == 'DUPLICATE'
+
+
+def test_sheet_outcomes_rejected_vs_failed_and_no_default_for_unknown_sku(client):
+    integ, send = _sheet_setup(client, ('SHEETS-R1',))
+    res = send([
+        {'row_number': 2, 'sku': 'UNKNOWN-SKU', 'customer_name': 'U', 'phone': '0673000001', 'external_order_id': 'rej-1'},
+        {'row_number': 3, 'sku': '', 'customer_name': 'E', 'phone': '0673000002', 'external_order_id': 'rej-2'},
+        {'row_number': 4, 'sku': 'SHEETS-R1', 'customer_name': 'P', 'phone': '12', 'external_order_id': 'rej-3'},
+        {'row_number': 5, 'sku': 'SHEETS-R1', 'customer_name': 'Ok', 'phone': '0673000003', 'external_order_id': 'rej-4'},
+    ])
+    assert [r['outcome'] for r in res['results']] == ['REJECTED', 'REJECTED', 'REJECTED', 'INSERTED']
+    assert res['summary']['rejected'] == 3 and res['summary']['inserted'] == 1 and res['summary']['failed'] == 3
+    # a default product must never absorb a NON-empty unknown SKU
+    prod = client.get('/api/v1/products?status=ACTIVE').json()[0]
+    integ2, send2 = _sheet_setup(client, ('SHEETS-R2',), extra_config={'default_product_id': prod['id']})
+    r2 = send2([{'row_number': 2, 'sku': 'UNKNOWN-SKU', 'customer_name': 'U', 'phone': '0673000009', 'external_order_id': 'rej-9'}])['results'][0]
+    assert r2['outcome'] == 'REJECTED'
+
+
+def test_sheet_sync_status_endpoint(client):
+    integ, send = _sheet_setup(client, ('SHEETS-S1',))
+    send([{'row_number': 2, 'sku': 'SHEETS-S1', 'customer_name': 'S', 'phone': '0674000001', 'external_order_id': 'st-1'},
+          {'row_number': 3, 'sku': 'NOPE', 'customer_name': 'S', 'phone': '0674000002', 'external_order_id': 'st-2'}])
+    st = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/sync-status").json()
+    assert st['last_successful_import_at'] and sum(st['imported_per_day'].values()) >= 1
+    assert st['last_batch']['inserted'] == 1 and st['last_batch']['rejected'] == 1
+    assert 'Product SKU not found: NOPE' in st['last_batch']['failure_reasons']
+    assert st['sheet_name_warning'] is None
+    assert 'token' not in str(st).lower()
+
+
+def test_generated_apps_script_executes_correctly_in_node(client, tmp_path):
+    import shutil, subprocess
+    from pathlib import Path
+    import pytest
+    if not shutil.which('node'):
+        pytest.skip('node not available')
+    integ, _ = _sheet_setup(client, ('SHEETS-N1',))
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()['script']
+    f = tmp_path / 'generated.js'
+    f.write_text(script)
+    out = subprocess.run(['node', str(Path(__file__).parent / 'appsscript_harness.js'), str(f)], capture_output=True, text=True)
+    assert out.returncode == 0 and 'APPS_SCRIPT_HARNESS_OK' in out.stdout, out.stdout + out.stderr
+
+
+def test_webhook_records_feed_identity_and_sync_status_lists_feeds(client):
+    integ, send_ = _sheet_setup(client, ('SHEETS-FD1',))
+    store = client.get('/api/v1/stores').json()[0]
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()
+    token = parse_qs(urlparse(script['webhook_url']).query)['token'][0]
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook"
+    row = {'row_number': 2, 'sku': 'SHEETS-FD1', 'customer_name': 'F', 'phone': '0675000001', 'external_order_id': 'fd-1'}
+    client.post(url, json={'client': {'spreadsheet': 'abc123', 'tab': 'orders', 'version': 'v2'}, 'orders': [row]}, headers={'X-Webhook-Token': token})
+    client.post(url, json={'client': {'spreadsheet': 'old999', 'tab': 'Sheet1', 'version': 'v2'}, 'orders': [{**row, 'sku': 'NOPE', 'external_order_id': 'fd-2', 'phone': '0675000002'}]}, headers={'X-Webhook-Token': token})
+    st = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/sync-status").json()
+    assert st['feeds_last_7_days']['abc123/orders']['inserted'] == 1
+    assert st['feeds_last_7_days']['old999/Sheet1']['rejected'] == 1
+
+
+# ----------------------------- regression suite for the lead-loss incident -----------------------------
+def _orders_with_ext(client, ext_prefix):
+    return [o for o in client.get('/api/v1/orders?search=').json() if str(o.get('external_order_id') or '').startswith(ext_prefix)]
+
+
+def test_same_customer_legitimate_repeat_orders_are_preserved(client):
+    integ, send = _sheet_setup(client, ('SHEETS-RP1',))
+    base = {'sku': 'SHEETS-RP1', 'customer_name': 'Repeat', 'phone': '0678000001', 'quantity': 1}
+    a = send([{**base, 'row_number': 2, 'external_order_id': 'rp-1', 'total_price': 100}])['results'][0]
+    b = send([{**base, 'row_number': 3, 'external_order_id': 'rp-2', 'total_price': 100}])['results'][0]       # new order id, same customer
+    c = send([{**base, 'row_number': 4, 'total_price': 100, 'lead_date': '2026-11-01'}])['results'][0]        # no id, same customer/product
+    d = send([{**base, 'row_number': 5, 'total_price': 100, 'lead_date': '2026-11-02'}])['results'][0]        # no id, later day
+    assert [x['outcome'] for x in (a, b, c, d)] == ['INSERTED'] * 4
+    assert len({x['order_number'] for x in (a, b, c, d)}) == 4
+
+
+def test_shared_id_sequences_across_spreadsheets_and_stores(client):
+    # two different spreadsheets (feeds) reuse the same numeric ids for different customers
+    integ, send = _sheet_setup(client, ('SHEETS-MS1',))
+    sc = lambda ss, p: send([{'row_number': 2, 'sku': 'SHEETS-MS1', 'customer_name': ss, 'phone': p, 'external_order_id': '5001'}])
+    r1 = sc('Feed A', '0679000001')['results'][0]; r2 = sc('Feed B', '0679000002')['results'][0]; r3 = sc('Feed C', '0679000003')['results'][0]
+    assert [r['outcome'] for r in (r1, r2, r3)] == ['INSERTED'] * 3 and [bool(r['collision']) for r in (r1, r2, r3)] == [False, True, True]
+    assert [sc('Feed B', '0679000002')['results'][0]['outcome'], sc('Feed C', '0679000003')['results'][0]['outcome']] == ['DUPLICATE'] * 2
+    # two stores sharing the same id sequence never interfere (dedupe is per store)
+    s2 = client.post('/api/v1/stores', json={'name': 'Second Store', 'code': 'S2X'})
+    assert s2.status_code == 200, s2.text
+    store2 = s2.json()
+    assert client.post('/api/v1/products', json={'store_id': store2['id'], 'name': 'P', 'sku': 'SHEETS-MS1-S2', 'selling_price': 100, 'currency': 'MAD', 'commission_per_confirmation': 1, 'offers': []}).status_code == 200
+    integ2 = client.post('/api/v1/integrations', json={'provider': 'GOOGLE_SHEETS', 'name': 'Store2 sheet', 'store_id': store2['id'], 'config': {'sheet_name': 'orders', 'auto_assign': False}, 'secrets': {}}).json()
+    scr = client.get(f"/api/v1/integrations/google-sheets/{integ2['id']}/script").json()
+    tok2 = parse_qs(urlparse(scr['webhook_url']).query)['token'][0]
+    res = client.post(f"/api/v1/integrations/google-sheets/{integ2['id']}/webhook", json={'orders': [{'row_number': 2, 'sku': 'SHEETS-MS1-S2', 'customer_name': 'Feed A', 'phone': '0679000001', 'external_order_id': '5001'}]}, headers={'X-Webhook-Token': tok2}).json()
+    assert res['results'][0]['outcome'] == 'INSERTED' and not res['results'][0]['collision']
+
+
+def test_quantity_total_and_validation_rules(client):
+    integ, send = _sheet_setup(client, ('SHEETS-Q1',))
+    res = send([
+        {'row_number': 2, 'sku': 'SHEETS-Q1', 'customer_name': 'Qty', 'phone': '0680000001', 'quantity': 3, 'total_price': 450, 'external_order_id': 'q-1'},
+        {'row_number': 3, 'sku': 'SHEETS-Q1', 'customer_name': '', 'phone': '0680000002', 'external_order_id': 'q-2'},      # blank name still has a phone: imported with default? -> must be explicit
+        {'row_number': 4, 'sku': 'SHEETS-Q1', 'phone': '0680000003', 'external_order_id': 'q-3'},                          # missing name key -> validation reject
+        {'row_number': 5, 'sku': 'SHEETS-Q1', 'customer_name': 'Bad Phone', 'phone': '123', 'external_order_id': 'q-4'},
+        {'row_number': 6, 'sku': 'SHEETS-Q1', 'customer_name': 'Neg', 'phone': '0680000005', 'total_price': -5, 'external_order_id': 'q-5'},
+    ])
+    out = {r['row_number']: r for r in res['results']}
+    assert out[2]['outcome'] == 'INSERTED'
+    assert out[4]['outcome'] == 'REJECTED' and 'customer_name' in out[4]['error']
+    assert out[5]['outcome'] == 'REJECTED' and 'phone' in out[5]['error'].lower()
+    assert out[6]['outcome'] == 'REJECTED'
+    order = next(o for o in client.get('/api/v1/orders?search=Qty').json() if o['external_order_id'] == 'q-1')
+    assert order['quantity'] == 3 and float(order['total_price']) == 450.0 and abs(float(order['unit_price']) - 150.0) < 1e-6
+
+
+def test_unique_index_blocks_double_insert_and_race_is_reported_as_duplicate(client, monkeypatch):
+    from decimal import Decimal
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+    from app.core.db import SessionLocal
+    from app.models import Customer, Order, Product
+    from app.services import google_sheets as gs
+
+    integ, send = _sheet_setup(client, ('SHEETS-RC1',))
+    store_id = client.get('/api/v1/stores').json()[0]['id']
+    first = send([{'row_number': 2, 'sku': 'SHEETS-RC1', 'customer_name': 'Race', 'phone': '0681000001', 'external_order_id': 'race-1'}])['results'][0]
+    assert first['outcome'] == 'INSERTED'
+    # 1) the database itself refuses a second order with the same (store, source id)
+    with SessionLocal() as db:
+        src = db.query(Order).filter(Order.external_order_id == 'race-1').one()
+        db.add(Order(order_number='CC-DUP-TEST', store_id=src.store_id, product_id=src.product_id, customer_id=src.customer_id, quantity=1, unit_price=1, total_price=1, currency='MAD', source='GOOGLE_SHEETS', external_order_id='race-1', call_status='NEW'))
+        with pytest.raises(IntegrityError):
+            db.flush()
+        db.rollback()
+
+    # 2) race: a concurrent request inserts the same lead after our lookup but before our insert
+    def racing_choose_agent(db, product_id, customer_id):
+        prod = db.query(Product).filter(Product.id == product_id).one()
+        db.add(Order(order_number='CC-RACE-WINNER', store_id=prod.store_id, product_id=product_id, customer_id=customer_id, quantity=1, unit_price=Decimal('100'), total_price=Decimal('100'), currency='MAD', source='GOOGLE_SHEETS', external_order_id='race-2', call_status='NEW'))
+        db.flush()
+        return None
+    monkeypatch.setattr(gs, 'choose_agent', racing_choose_agent)
+    integ2, send2 = _sheet_setup(client, ('SHEETS-RC2',), extra_config={'auto_assign': True})
+    res = send2([{'row_number': 2, 'sku': 'SHEETS-RC2', 'customer_name': 'Race2', 'phone': '0681000002', 'external_order_id': 'race-2'}])
+    # the winner belongs to the same customer but another product(SKU) is irrelevant: same store+id+phone => duplicate, never two orders
+    assert res['results'][0]['outcome'] == 'DUPLICATE'
+    assert len([o for o in client.get('/api/v1/orders?search=').json() if o['external_order_id'] == 'race-2']) == 1
+
+
+def test_api_counts_match_database_and_dashboard(client):
+    integ, send = _sheet_setup(client, ('SHEETS-DB1',))
+    before = client.get('/api/v1/analytics/overview?range=today').json()['leads']
+    n = 4
+    send([{'row_number': i + 2, 'sku': 'SHEETS-DB1', 'customer_name': f'Dash{i}', 'phone': f'068200000{i}', 'external_order_id': f'dash-{i}'} for i in range(n)])
+    send([{'row_number': i + 2, 'sku': 'SHEETS-DB1', 'customer_name': f'Dash{i}', 'phone': f'068200000{i}', 'external_order_id': f'dash-{i}'} for i in range(n)])  # repeat webhook
+    after = client.get('/api/v1/analytics/overview?range=today').json()['leads']
+    assert after - before == n
+    page = client.get('/api/v1/orders/paginated?limit=100&offset=0&search=Dash').json()
+    assert (page['total'] if isinstance(page, dict) and 'total' in page else len(page)) >= n

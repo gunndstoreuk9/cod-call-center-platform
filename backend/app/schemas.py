@@ -1,5 +1,6 @@
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -303,8 +304,11 @@ class SheetWebhookOrder(BaseModel):
     total_price: Decimal | None = Field(default=None, ge=0)
     product_name: str | None = None
     external_order_id: str | None = None
+    lead_date: str | None = None
     note: str | None = None
 
 
 class SheetWebhookBatch(BaseModel):
-    orders: list[SheetWebhookOrder]
+    # Rows are validated one by one in the webhook so a single bad row cannot reject the whole batch.
+    orders: list[dict[str, Any]]
+    client: dict[str, Any] | None = None   # {spreadsheet: md5 prefix, tab, version} - identifies the feed

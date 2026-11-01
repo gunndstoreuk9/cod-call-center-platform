@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 import secrets
 from datetime import datetime
+from pathlib import Path
 from decimal import Decimal
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -16,63 +21,144 @@ def new_order_number() -> str:
     return f"CC-{datetime.now().strftime('%y%m%d')}-{secrets.token_hex(3).upper()}"
 
 
-def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) -> dict:
-    config = dict(integration.config or {})
-    store_id = integration.store_id
-    store = db.query(Store).filter(Store.id == store_id).first() if store_id else None
-    if not store:
-        return {"status": "ERROR", "error": "Integration store not found", "row_number": item.get("row_number")}
+def _fit(value, limit: int) -> str:
+    """Trim to the DB column width so one long cell cannot make the whole row fail."""
+    return str(value or "").strip()[:limit]
 
-    external = str(item.get("external_order_id") or "").strip() or None
-    if external:
-        existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
-        if existing:
-            return {"status": "IMPORTED", "order_id": existing.id, "order_number": existing.order_number, "duplicate": True, "row_number": item.get("row_number")}
+
+def _norm(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def lead_fingerprint(store_id: str, phone_e164: str, sku: str, qty: int, total, name: str, lead_date) -> str:
+    """Stable identity for a lead that does not depend on its sheet row position."""
+    raw = "|".join([store_id, phone_e164, sku.upper(), str(qty), "" if total is None else str(Decimal(str(total)).normalize()), _norm(name), _norm(lead_date)])
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _result(item: dict, status: str, outcome: str, **extra) -> dict:
+    return {"status": status, "outcome": outcome, "row_number": item.get("row_number"), **extra}
+
+
+def _same_lead(db: Session, existing: Order, phone: str, sku: str) -> bool:
+    """A stored order is the SAME lead only when phone (and SKU, if both known) match.
+
+    Matching on external id alone silently dropped different leads that share an id
+    (re-used ids, several feeds, Shopify multi-line orders)."""
+    customer = db.query(Customer).filter(Customer.id == existing.customer_id).first()
+    if not customer or customer.phone_e164 != phone:
+        return False
+    if sku:
+        product = db.query(Product).filter(Product.id == existing.product_id).first()
+        if product and (product.sku or "").upper() != sku:
+            return False
+    return True
+
+
+def _duplicate(item: dict, existing: Order) -> dict:
+    return _result(item, "IMPORTED", "DUPLICATE", order_id=existing.id, order_number=existing.order_number, duplicate=True)
+
+
+def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) -> dict:
+    """Import one lead idempotently. outcome is one of INSERTED, DUPLICATE, REJECTED (permanent) or FAILED (transient)."""
+    config = dict(integration.config or {})
+    store = db.query(Store).filter(Store.id == integration.store_id).first() if integration.store_id else None
+    if not store:
+        return _result(item, "ERROR", "FAILED", error="Integration store not found")
 
     sku = str(item.get("sku") or "").strip().upper()
-    product = db.query(Product).filter(Product.store_id == store.id, Product.sku == sku, Product.status == "ACTIVE").first() if sku else None
-    if not product and config.get("default_product_id"):
-        product = db.query(Product).filter(Product.id == config["default_product_id"], Product.store_id == store.id, Product.status == "ACTIVE").first()
-    if not product:
-        return {"status": "ERROR", "error": f"Product SKU not found: {sku or '(empty)'}", "row_number": item.get("row_number")}
-
     try:
         phone = normalize_phone(str(item.get("phone") or ""), store.country)
     except Exception as exc:
-        return {"status": "ERROR", "error": f"Invalid phone: {exc}", "row_number": item.get("row_number")}
+        return _result(item, "ERROR", "REJECTED", error=f"Invalid phone: {exc}")
+    qty = max(int(item.get("quantity") or 1), 1)
+    total = Decimal(str(item.get("total_price"))) if item.get("total_price") not in (None, "") else None
+    name = _fit(item.get("customer_name") or "Customer", 160)
+    fp = lead_fingerprint(store.id, phone, sku, qty, total, name, item.get("lead_date"))
+
+    # ---- identity / idempotency -------------------------------------------------
+    supplied = str(item.get("external_order_id") or "").strip()[:140]
+    legacy_row_id = supplied.startswith("sheet:")          # old scripts used row position as identity
+    collision = False
+    if supplied and not legacy_row_id:
+        external = supplied
+        existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+        if existing:
+            if _same_lead(db, existing, phone, sku):
+                return _duplicate(item, existing)
+            # Same id, different lead: do NOT drop it. Give it a derived, still-deterministic id.
+            collision = True
+            external = f"{external[:125]}~{fp[:10]}"
+            again = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+            if again:
+                return _duplicate(item, again)
+    else:
+        external = f"fp:{fp}"
+        existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+        if existing:
+            return _duplicate(item, existing)
+        # Orders imported earlier under a row-position id: same lead only if phone matches.
+        legacy_candidates = []
+        if supplied:
+            legacy_candidates = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == supplied).all()
+        elif item.get("row_number"):
+            legacy_candidates = db.query(Order).filter(Order.store_id == store.id, Order.source == "GOOGLE_SHEETS", Order.external_order_id.like(f"sheet:%:{int(item['row_number'])}")).all()
+        for cand in legacy_candidates:
+            if _same_lead(db, cand, phone, sku):
+                return _duplicate(item, cand)
+
+    product = db.query(Product).filter(Product.store_id == store.id, Product.sku == sku, Product.status == "ACTIVE").first() if sku else None
+    if not product and not sku and config.get("default_product_id"):
+        # default product is only used when the integration owner configured it AND the row has no SKU at all.
+        product = db.query(Product).filter(Product.id == config["default_product_id"], Product.store_id == store.id, Product.status == "ACTIVE").first()
+    if not product:
+        return _result(item, "ERROR", "REJECTED", error=f"Product SKU not found: {sku or '(empty)'}")
+
     customer = db.query(Customer).filter(Customer.phone_e164 == phone).first()
     if not customer:
-        customer = Customer(name=str(item.get("customer_name") or "Customer").strip(), phone_raw=str(item.get("phone") or ""), phone_e164=phone, city=item.get("city"), address=item.get("address"))
+        customer = Customer(name=name, phone_raw=_fit(item.get("phone"), 60), phone_e164=phone, city=_fit(item.get("city"), 120) or None, address=item.get("address"))
         db.add(customer)
         db.flush()
     else:
-        customer.name = str(item.get("customer_name") or customer.name).strip() or customer.name
-        customer.city = item.get("city") or customer.city
+        customer.name = name or customer.name
+        customer.city = _fit(item.get("city"), 120) or customer.city
         customer.address = item.get("address") or customer.address
 
-    qty = max(int(item.get("quantity") or 1), 1)
-    total = Decimal(str(item.get("total_price"))) if item.get("total_price") not in (None, "") else Decimal(product.selling_price) * qty
-    unit = total / qty if qty else Decimal(product.selling_price)
+    total_v = total if total is not None else Decimal(product.selling_price) * qty
+    unit = total_v / qty if qty else Decimal(product.selling_price)
     agent = choose_agent(db, product.id, customer.id) if config.get("auto_assign", True) else None
     row = Order(
         order_number=new_order_number(), store_id=store.id, product_id=product.id, customer_id=customer.id,
-        assigned_agent_id=agent.id if agent else None, quantity=qty, unit_price=unit, total_price=total,
+        assigned_agent_id=agent.id if agent else None, quantity=qty, unit_price=unit, total_price=total_v,
         currency=product.currency or store.currency, source="GOOGLE_SHEETS", external_order_id=external,
-        call_status="NEW", call_note=item.get("note"), city=item.get("city"), address=item.get("address"),
+        call_status="NEW", call_note=item.get("note"), city=_fit(item.get("city"), 120) or None, address=item.get("address"),
         assigned_at=utcnow() if agent else None,
     )
-    db.add(row)
-    db.flush()
-    if agent:
-        db.add(OrderAssignment(order_id=row.id, agent_id=agent.id, assignment_type="SMART_SCORE"))
-    db.add(IntegrationEvent(integration_id=integration.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="ORDER_IMPORT", status="SUCCESS", entity_type="ORDER", entity_id=row.id, payload={"row_number": item.get("row_number"), "sku": sku, "external_order_id": external}))
-    db.flush()
-    return {"status": "IMPORTED", "order_id": row.id, "order_number": row.order_number, "duplicate": False, "row_number": item.get("row_number")}
+    try:
+        with db.begin_nested():
+            db.add(row)
+            db.flush()
+            if agent:
+                db.add(OrderAssignment(order_id=row.id, agent_id=agent.id, assignment_type="SMART_SCORE"))
+            db.add(IntegrationEvent(integration_id=integration.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="ORDER_IMPORT", status="SUCCESS", entity_type="ORDER", entity_id=row.id, payload={"row_number": item.get("row_number"), "sku": sku, "external_order_id": external, "collision": collision}))
+            db.flush()
+    except IntegrityError:
+        # A concurrent request inserted the same lead first (unique index uq_orders_gsheets_ext). Never double-insert:
+        winner = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+        if winner is not None and _same_lead(db, winner, phone, sku):
+            return _duplicate(item, winner)
+        return _result(item, "ERROR", "FAILED", error="Concurrent import conflict; will be retried")
+    return _result(item, "IMPORTED", "INSERTED", order_id=row.id, order_number=row.order_number, duplicate=False, collision=collision)
+
+
+_SCRIPT_DIR = Path(__file__).parent / "apps_script"
 
 
 def apps_script(integration: IntegrationConfig, webhook_token: str) -> str:
     config = dict(integration.config or {})
     public_api = settings.public_api_base_url.rstrip("/")
-    webhook = f"{public_api}/api/v1/integrations/google-sheets/{integration.id}/webhook?token={webhook_token}"
-    sheet_name = str(config.get("sheet_name") or "Sheet1").replace("'", "\\'")
-    return f'''// COD Call Center -> Google Sheets importer\n// Generated by Admin > Integrations. Keep CALL_CENTER_WEBHOOK private.\nconst CALL_CENTER_WEBHOOK = '{webhook}';\nconst SOURCE_SHEET_NAME = '{sheet_name}';\n\nconst HEADER_ALIASES = {{\n  sku: ['SKU','Product SKU','Lineitem sku','Variant SKU'],\n  customer_name: ['FULL NAME','Full Name','Name','Customer Name','Shipping Name'],\n  phone: ['PHONE NUMBER','Phone Number','Phone','Mobile','Shipping Phone'],\n  city: ['CITY','City','Shipping City'],\n  address: ['ADDRESS','Address','Shipping Address','Address1'],\n  quantity: ['QUANTITY','Quantity','Qty','Lineitem quantity'],\n  total_price: ['TOTAL PRICE MAD','Total Price MAD','Total','Price','Amount'],\n  product_name: ['PRODUCT NAME','Product Name','Lineitem name'],\n  external_order_id: ['SHOPIFY ORDER ID','Shopify Order ID','Order ID','Order Number','Order Name'],\n  note: ['NOTE','Note','Notes']\n}};\n\nfunction normalizeHeader(v) {{ return String(v || '').trim().toLowerCase(); }}\nfunction headerIndex(headers, aliases) {{\n  const normalized = headers.map(normalizeHeader);\n  for (const alias of aliases) {{\n    const i = normalized.indexOf(normalizeHeader(alias));\n    if (i >= 0) return i;\n  }}\n  return -1;\n}}\nfunction getCell(row, headers, key) {{\n  const i = headerIndex(headers, HEADER_ALIASES[key] || []);\n  return i >= 0 ? row[i] : '';\n}}\nfunction ensureColumn(sheet, headers, name) {{\n  let i = headers.map(normalizeHeader).indexOf(normalizeHeader(name));\n  if (i >= 0) return i + 1;\n  const col = headers.length + 1;\n  sheet.getRange(1, col).setValue(name);\n  headers.push(name);\n  return col;\n}}\n\nfunction sendNewLeadsToCallCenter() {{\n  const ss = SpreadsheetApp.getActiveSpreadsheet();\n  const sheet = ss.getSheetByName(SOURCE_SHEET_NAME);\n  if (!sheet) throw new Error('Sheet not found: ' + SOURCE_SHEET_NAME);\n  const values = sheet.getDataRange().getValues();\n  if (values.length < 2) return;\n  const headers = values[0].map(v => String(v || '').trim());\n  const statusCol = ensureColumn(sheet, headers, 'CALL CENTER IMPORT STATUS');\n  const orderCol = ensureColumn(sheet, headers, 'CALL CENTER ORDER ID');\n  const errorCol = ensureColumn(sheet, headers, 'CALL CENTER IMPORT ERROR');\n  const orders = [];\n  for (let r = 1; r < values.length; r++) {{\n    const row = values[r];\n    const current = String(sheet.getRange(r + 1, statusCol).getValue() || '').trim().toUpperCase();\n    if (current === 'IMPORTED') continue;\n    const phone = String(getCell(row, headers, 'phone') || '').trim();\n    const customer = String(getCell(row, headers, 'customer_name') || '').trim();\n    if (!phone || !customer) continue;\n    const externalRaw = String(getCell(row, headers, 'external_order_id') || '').trim();\n    orders.push({{\n      row_number: r + 1, sku: String(getCell(row, headers, 'sku') || '').trim(), customer_name: customer, phone: phone,\n      city: String(getCell(row, headers, 'city') || '').trim(), address: String(getCell(row, headers, 'address') || '').trim(),\n      quantity: Number(getCell(row, headers, 'quantity') || 1), total_price: getCell(row, headers, 'total_price') === '' ? null : Number(getCell(row, headers, 'total_price')),\n      product_name: String(getCell(row, headers, 'product_name') || '').trim(),\n      external_order_id: externalRaw || ('sheet:' + ss.getId() + ':' + SOURCE_SHEET_NAME + ':' + (r + 1)),\n      note: String(getCell(row, headers, 'note') || '').trim()\n    }});\n  }}\n  if (!orders.length) return;\n  const response = UrlFetchApp.fetch(CALL_CENTER_WEBHOOK, {{ method:'post', contentType:'application/json', payload:JSON.stringify({{orders:orders}}), muteHttpExceptions:true }});\n  const code = response.getResponseCode();\n  if (code < 200 || code >= 300) throw new Error('Call Center HTTP ' + code + ': ' + response.getContentText());\n  const body = JSON.parse(response.getContentText());\n  (body.results || []).forEach(result => {{\n    const rowNumber = Number(result.row_number);\n    if (!rowNumber) return;\n    sheet.getRange(rowNumber, statusCol).setValue(result.status || 'ERROR');\n    sheet.getRange(rowNumber, orderCol).setValue(result.order_number || result.order_id || '');\n    sheet.getRange(rowNumber, errorCol).setValue(result.error || '');\n  }});\n}}\n\nfunction installEveryMinuteTrigger() {{\n  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendNewLeadsToCallCenter').forEach(t => ScriptApp.deleteTrigger(t));\n  ScriptApp.newTrigger('sendNewLeadsToCallCenter').timeBased().everyMinutes(1).create();\n}}\n\nfunction removeCallCenterTriggers() {{\n  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'sendNewLeadsToCallCenter').forEach(t => ScriptApp.deleteTrigger(t));\n}}\n'''
+    webhook = f"{public_api}/api/v1/integrations/google-sheets/{integration.id}/webhook"
+    sheet_name = str(config.get("sheet_name") or "Sheet1")
+    template = (_SCRIPT_DIR / "sync.gs.tmpl").read_text(encoding="utf-8")
+    script = template.replace("__WEBHOOK__", json.dumps(webhook)).replace("__TOKEN__", json.dumps(webhook_token)).replace("__SHEET__", json.dumps(sheet_name))
+    return script + "\n" + (_SCRIPT_DIR / "diagnose_missing_leads.gs").read_text(encoding="utf-8")

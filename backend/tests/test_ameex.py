@@ -104,7 +104,7 @@ def test_dispatch_and_webhook(client, monkeypatch):
     assert method=='POST' and url==ameex.BASE_URL+'/Delivery/Parcels/Action/Type/Add'
     assert headers['C-Api-Id']=='demo-id' and headers['C-Api-Key']=='test_demo'
     assert p=={'type':'SIMPLE','receiver':'Test Receiver','phone':'0677777777','city':'1','cod':'398.00',
-        'address':'Test address','product':'AMEEX Product x2','comment':'','order_num':o['order_number']}
+        'address':'Test address','product':'AMEEX Product x2','comment':'','order_num':o['order_number'],'business':'demo-id'}
     assert client.post(path).status_code==502
     assert len(calls)==2
     raw=urlencode({'CODE':tracking,'STATUT':'DELIVERED','STATUT_NAME':'Livré','COMMENT':'Reçu + merci','SANDBOX':'1'}).encode()

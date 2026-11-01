@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -244,6 +245,13 @@ class Order(Base):
     __table_args__ = (
         Index("ix_orders_created_call", "created_at", "call_status"),
         Index("ix_orders_agent_created", "assigned_agent_id", "created_at"),
+        # Hard idempotency guarantee for sheet imports under concurrent webhooks. Derived ids (id~fingerprint) keep
+        # genuinely different leads that share a source id from violating it.
+        Index(
+            "uq_orders_gsheets_ext", "store_id", "external_order_id", unique=True,
+            postgresql_where=text("source = 'GOOGLE_SHEETS' AND external_order_id IS NOT NULL"),
+            sqlite_where=text("source = 'GOOGLE_SHEETS' AND external_order_id IS NOT NULL"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid4_str)
