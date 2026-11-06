@@ -5,11 +5,13 @@ from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import require_roles
+from app.core.sources import RECOVERY_SOURCE
 from app.core.time import date_bounds, utcnow
 from app.models import (
     AdSpend,
@@ -240,11 +242,13 @@ def confirmation_count(
     end,
     store_id: str | None,
     product_id: str | None,
+    recovered: bool = False,
 ):
     q = db.query(Order).filter(
         Order.confirmed_at.is_not(None),
         Order.confirmed_at >= start,
         Order.confirmed_at < end,
+        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
     )
 
     if store_id:
@@ -266,10 +270,12 @@ def created_count(
     end,
     store_id: str | None,
     product_id: str | None,
+    recovered: bool = False,
 ):
     q = db.query(Order).filter(
         Order.created_at >= start,
         Order.created_at < end,
+        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
     )
 
     if store_id:
@@ -281,6 +287,31 @@ def created_count(
         q = q.filter(
             Order.product_id == product_id
         )
+
+    return q.count()
+
+
+def delivered_count(
+    db: Session,
+    start,
+    end,
+    store_id: str | None,
+    product_id: str | None,
+    recovered: bool,
+):
+    q = db.query(Order).filter(
+        Order.delivery_status == "DELIVERED",
+        Order.delivered_at.is_not(None),
+        Order.delivered_at >= start,
+        Order.delivered_at < end,
+        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
+    )
+
+    if store_id:
+        q = q.filter(Order.store_id == store_id)
+
+    if product_id:
+        q = q.filter(Order.product_id == product_id)
 
     return q.count()
 
@@ -843,6 +874,20 @@ def profit_dashboard(
         product_id
     )
 
+    # Advertising CPL/CPA are acquisition metrics: historical recovered leads are reported separately and do not
+    # lower them. Revenue, costs and AOV stay on ALL delivered orders (real money, no double counting).
+    delivered_acquisition = delivered_count(db, start, end, store_id, product_id, False)
+    recovered_leads = created_count(db, start, end, store_id, product_id, True)
+    recovered_confirmed = confirmation_count(db, start, end, store_id, product_id, True)
+    recovered_delivered = delivered_count(db, start, end, store_id, product_id, True)
+    revenue_recovered_q = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(
+        Order.delivery_status == "DELIVERED", Order.delivered_at.is_not(None), Order.delivered_at >= start, Order.delivered_at < end, Order.source == RECOVERY_SOURCE)
+    if store_id:
+        revenue_recovered_q = revenue_recovered_q.filter(Order.store_id == store_id)
+    if product_id:
+        revenue_recovered_q = revenue_recovered_q.filter(Order.product_id == product_id)
+    revenue_recovered = revenue_recovered_q.scalar() or 0
+
     return {
         "range": range,
         "start": start,
@@ -857,6 +902,12 @@ def profit_dashboard(
         "leads": leads,
         "confirmed": confirmed,
         "delivered": delivered,
+        "recovered_leads": recovered_leads,
+        "recovered_confirmed": recovered_confirmed,
+        "recovered_delivered": recovered_delivered,
+        # `revenue`/`delivered`/AOV cover ALL delivered orders; `leads`/`confirmed`/CPA cover acquired leads only.
+        "revenue_recovered": str(revenue_recovered),
+        "kpi_population": {"leads_confirmed_cpa": "acquisition_only", "revenue_delivered_aov_costs": "all_orders_incl_recovered"},
         "units_delivered": units,
         "refused": refused,
         "returned": returned,
@@ -914,10 +965,10 @@ def profit_dashboard(
         "cpa_delivered": (
             round(
                 float(ad_spend)
-                / delivered,
+                / delivered_acquisition,
                 2
             )
-            if delivered
+            if delivered_acquisition
             else 0.0
         ),
 

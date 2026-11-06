@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import current_user, require_roles
+from app.core.sources import RECOVERY_SOURCE
 from app.core.time import utcnow
 from app.models import AgentProduct, DeliveryShipment, IntegrationConfig, IntegrationEvent, Order, Store, User
 from app.schemas import IntegrationCreate, IntegrationOut, IntegrationUpdate, SheetWebhookBatch, SheetWebhookOrder
@@ -422,6 +423,7 @@ def google_sheets_sync_status(
         "imported_per_day": dict(sorted(per_day.items())),
         "last_batch": None if not last_batch else {"at": last_batch.created_at, **(last_batch.payload or {})},
         "feeds_last_7_days": feeds,
+        "recovered_leads_total": db.query(func.count(Order.id)).filter(Order.source == RECOVERY_SOURCE, Order.store_id == row.store_id).scalar() or 0,
         "alerts": alerts,
     }
 

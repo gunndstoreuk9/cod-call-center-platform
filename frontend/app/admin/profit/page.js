@@ -376,6 +376,11 @@ export default function ProfitPage() {
         ))}
       </div>
 
+      <p className="muted" style={{fontSize:12,margin:'4px 2px 12px'}}>
+        {t('Confirmed and CPA count acquired leads only. Delivered, Revenue, Costs and Profit include recovered historical orders.')}
+        {Number(dashboard?.recovered_leads || 0) + Number(dashboard?.recovered_delivered || 0) > 0 && ` ${t('Recovered')}: ${dashboard?.recovered_leads || 0} ${t('leads')}, ${dashboard?.recovered_confirmed || 0} ${t('confirmed')}, ${dashboard?.recovered_delivered || 0} ${t('delivered')} (${money(dashboard?.revenue_recovered || 0, dashboard?.currency || 'MAD')}).`}
+      </p>
+
       <div className="panel profit-panel">
         <div className="panel-head">
           <div>
