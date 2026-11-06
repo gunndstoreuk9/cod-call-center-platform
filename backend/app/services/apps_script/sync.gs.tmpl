@@ -46,11 +46,11 @@ function getCell(row, headers, key) {
   const i = headerIndex(headers, HEADER_ALIASES[key] || []);
   return i >= 0 ? row[i] : '';
 }
-function ensureColumn(sheet, headers, name) {
+function ensureColumn(sheet, headers, name, readOnly) {
   const i = headers.map(normalizeHeader).indexOf(normalizeHeader(name));
   if (i >= 0) return i + 1;
   const col = headers.length + 1;
-  sheet.getRange(1, col).setValue(name);
+  if (!readOnly) sheet.getRange(1, col).setValue(name);   // dry runs never write, not even a missing helper header
   headers.push(name);
   return col;
 }
@@ -118,10 +118,10 @@ function syncLeads_(mode, opts) {
     ['customer_name', 'phone', 'sku'].forEach(function (k) {
       if (headerIndex(headers0, HEADER_ALIASES[k]) < 0) throw new Error('Required column not found for "' + k + '". Headers seen: ' + headers0.join(' | ') + '. Accepted: ' + HEADER_ALIASES[k].join(' | '));
     });
-    const statusCol = ensureColumn(sheet, headers0, STATUS_HEADER);
-    const orderCol = ensureColumn(sheet, headers0, ORDER_HEADER);
-    const errorCol = ensureColumn(sheet, headers0, ERROR_HEADER);
-    const hashCol = ensureColumn(sheet, headers0, HASH_HEADER);
+    const statusCol = ensureColumn(sheet, headers0, STATUS_HEADER, dryRun);
+    const orderCol = ensureColumn(sheet, headers0, ORDER_HEADER, dryRun);
+    const errorCol = ensureColumn(sheet, headers0, ERROR_HEADER, dryRun);
+    const hashCol = ensureColumn(sheet, headers0, HASH_HEADER, dryRun);
     SpreadsheetApp.flush();
     const values = sheet.getDataRange().getValues();   // read AFTER the helper columns exist
     if (values.length < 2) { maybePing_(ss, false); return; }

@@ -331,3 +331,5 @@ function backupProjectState() {
   out.push('=== end (nothing changed) ===');
   Logger.log(out.join('\n'));
 }
+
+// ==== END OF CODOPS V2 FILE - if you cannot see this line at the very bottom, the paste is incomplete ====

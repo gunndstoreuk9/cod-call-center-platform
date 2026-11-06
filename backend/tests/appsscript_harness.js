@@ -142,6 +142,18 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
     api.sendNewLeadsToCallCenter(); assert.strictEqual(fetched.length, 1, 'no second ping within the interval'); assert.ok(props.LAST_PING); }
 }
 
+// ---------- dry run is truly write-free, even when the CALL CENTER ROW HASH header is missing ----------
+{
+  const H = ['Product SKU', 'Full Name', 'Phone', 'City', 'Product Quantity', 'Total Price', 'Product Name', 'Order ID', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR'];
+  const sheet = makeSheet('orders', [H, ['SKU1', 'Done', '0633333333', 'X', 2, 249, 'p', '1001', 'IMPORTED', 'CC-1', '']]);
+  const { api, fetched } = boot({ orders: sheet }, body => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ results: body.orders.map(o => ({ row_number: o.row_number, status: 'IMPORTED', outcome: 'DUPLICATE', order_number: 'CC-1' })) }) }));
+  api.runRecovery_([2], true);
+  assert.ok(fetched[0].url.endsWith('?dry_run=true')); assert.strictEqual(sheet.writes.length, 0, 'dry run must not write any cell, including a missing helper header');
+  assert.strictEqual(sheet.data[0].length, H.length, 'header row untouched');
+  api.sendNewLeadsToCallCenter();                     // the first REAL tick adds the one helper header
+  assert.deepStrictEqual(sheet.writes.map(w => w.slice(0, 2)), [[1, 12]]); assert.strictEqual(sheet.data[0][11], 'CALL CENTER ROW HASH');
+}
+
 // ---------- targeted recovery: dry run writes nothing; apply sends only the listed rows ----------
 {
   const H = ['Order ID', 'Full Name', 'Phone', 'SKU', 'Product Quantity', 'Total Price', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];
