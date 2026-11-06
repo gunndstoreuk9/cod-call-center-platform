@@ -174,7 +174,7 @@ def classify(rows: list[Row], existing: list[dict], offers: dict[str, set[tuple[
             r.reasons += review
             continue
         if (r.quantity, r.total) not in offers.get(r.sku, set()):
-            r.flags.append(f"PRICE_NOT_IN_OFFERS: {r.quantity} x {r.sku} for {r.total} MAD is not an active CODOPS offer (price kept as exported)")
+            r.flags.append(f"PRICE_NOT_IN_OFFERS: {r.quantity} x {r.sku} for {r.total} MAD is not an active CODOPS offer. Price kept exactly as exported - the agent MUST verify the price with the customer BEFORE confirming or dispatching.")
     # repeated customer inside the supplied files
     phones: dict[str, list[Row]] = {}
     for r in rows:

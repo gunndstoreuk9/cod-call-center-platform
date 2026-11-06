@@ -171,3 +171,34 @@ def test_assignment_tool_same_customer_one_agent_retry_safe_and_acquisition_unto
     p = client.get('/api/v1/profit/dashboard?range=today').json()
     assert p["backfilled_leads"] >= 7 and p["kpi_population"]["leads_confirmed_cpa"] == "acquisition_only"
     db.close()
+
+
+def test_backfill_orders_work_through_the_api_and_the_agent_queue_with_price_flag_visible(client):
+    from app.api.routes import orders as R
+    _, pids = _world(client, "CBF-1", "CBF-2")
+    agent_ids = _agents(pids)
+    sp = [spec("e.csv", "epsilon", {"CSV-SKU": "CBF-1"})]
+    texts = {"e.csv": csv_text(("CSV-SKU", "Eps Normal", "212751000001", "Fes", 1, 199, "p", 501), ("CSV-SKU", "Eps Odd Price", "212762000002", "Rabat", 2, 349, "p", 502))}
+    db = SessionLocal()
+    backfill_run(db, texts, "T4", apply=True, include=set(), specs=sp)
+    assign_run(db, BACKFILL_SOURCE, "T4", apply=True)
+    # Orders API: list/search/detail return the new source and the flag text
+    page = client.get('/api/v1/orders/paginated?limit=50&offset=0&search=Eps').json()
+    items = page["items"] if isinstance(page, dict) and "items" in page else page
+    mine = [o for o in items if o.get("source") == BACKFILL_SOURCE]
+    assert len(mine) == 2 and all(o["call_status"] == "NEW" and o["assigned_agent_id"] for o in mine)
+    odd = next(o for o in mine if o["external_order_id"] == "csv:epsilon:502")
+    detail = client.get(f"/api/v1/orders/{odd['id']}").json()
+    assert detail["source"] == BACKFILL_SOURCE and float(detail["total_price"]) == 349.0 and detail["quantity"] == 2
+    assert "MUST verify the price with the customer BEFORE confirming or dispatching" in detail["call_note"]
+    normal = next(o for o in mine if o["external_order_id"] == "csv:epsilon:501")
+    assert "MUST verify" not in client.get(f"/api/v1/orders/{normal['id']}").json()["call_note"]
+    # the assigned agent sees each order in the normal calling queue and the agent workspace board
+    with SessionLocal() as s:
+        for o in mine:
+            agent = s.query(User).filter(User.id == o["assigned_agent_id"]).one()
+            q = {x["id"] for x in R.my_queue(bucket="NEW", limit=200, db=s, user=agent)}
+            board = R.agent_board(bucket="NEW", product_id=None, search=None, limit=100, offset=0, db=s, user=agent)
+            lst = next((v for v in (board.get("orders"), board.get("items"), board.get("rows")) if isinstance(v, list)), []) if isinstance(board, dict) else board
+            assert o["id"] in q and o["id"] in {x["id"] if isinstance(x, dict) else x.id for x in lst}
+    db.close()
