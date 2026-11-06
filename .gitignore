@@ -9,3 +9,7 @@ node_modules/
 dist/
 coverage/
 .DS_Store
+
+# Customer personal data: never commit
+backend/private_imports/
+*.csv

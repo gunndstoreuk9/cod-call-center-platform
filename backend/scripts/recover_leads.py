@@ -47,9 +47,9 @@ def dashboard_probe(db) -> dict:
     """Key dashboard / profit figures for today, read through the real report functions (inside the caller's transaction)."""
     from app.api.routes import analytics, profit
     o = analytics.overview(range="today", from_date=None, to_date=None, db=db, _=None)
-    keys = ("leads", "called", "confirmed", "confirmation_rate", "assigned", "unassigned", "recovered_leads", "recovered_unassigned", "recovered_confirmed", "confirmed_revenue", "confirmed_revenue_recovered", "delivered_revenue_recovered")
+    keys = ("leads", "called", "confirmed", "confirmation_rate", "assigned", "unassigned", "recovered_leads", "recovered_unassigned", "recovered_confirmed", "backfilled_leads", "backfilled_unassigned", "backfilled_confirmed", "confirmed_revenue", "confirmed_revenue_recovered", "delivered_revenue_recovered")
     p = profit.profit_dashboard(range="today", from_date=None, to_date=None, store_id=None, product_id=None, db=db, _=None)
-    pk = ("leads", "confirmed", "cpa_confirmed", "cpa_delivered", "recovered_leads", "recovered_confirmed", "revenue", "revenue_recovered")
+    pk = ("leads", "confirmed", "cpa_confirmed", "cpa_delivered", "recovered_leads", "recovered_confirmed", "backfilled_leads", "backfilled_confirmed", "revenue", "revenue_recovered")
     return {"overview": {k: o[k] for k in keys}, "profit": {k: p[k] for k in pk}}
 
 

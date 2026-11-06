@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import require_roles
-from app.core.sources import RECOVERY_SOURCE
+from app.core.sources import BACKFILL_SOURCE, HISTORICAL_SOURCES, RECOVERY_SOURCE
 from app.core.time import date_bounds, utcnow
 from app.models import (
     AdSpend,
@@ -243,12 +243,13 @@ def confirmation_count(
     store_id: str | None,
     product_id: str | None,
     recovered: bool = False,
+    source: str | None = None,
 ):
     q = db.query(Order).filter(
         Order.confirmed_at.is_not(None),
         Order.confirmed_at >= start,
         Order.confirmed_at < end,
-        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
+        _group_filter(recovered, source),
     )
 
     if store_id:
@@ -264,6 +265,13 @@ def confirmation_count(
     return q.count()
 
 
+def _group_filter(recovered: bool, source: str | None):
+    """acquisition (default) = not historical; recovered=True => Google Sheets recovery; source=... => that one source."""
+    if source:
+        return Order.source == source
+    return (Order.source == RECOVERY_SOURCE) if recovered else Order.source.notin_(HISTORICAL_SOURCES)
+
+
 def created_count(
     db: Session,
     start,
@@ -271,11 +279,12 @@ def created_count(
     store_id: str | None,
     product_id: str | None,
     recovered: bool = False,
+    source: str | None = None,
 ):
     q = db.query(Order).filter(
         Order.created_at >= start,
         Order.created_at < end,
-        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
+        _group_filter(recovered, source),
     )
 
     if store_id:
@@ -298,13 +307,14 @@ def delivered_count(
     store_id: str | None,
     product_id: str | None,
     recovered: bool,
+    source: str | None = None,
 ):
     q = db.query(Order).filter(
         Order.delivery_status == "DELIVERED",
         Order.delivered_at.is_not(None),
         Order.delivered_at >= start,
         Order.delivered_at < end,
-        (Order.source == RECOVERY_SOURCE) if recovered else (Order.source != RECOVERY_SOURCE),
+        _group_filter(recovered, source),
     )
 
     if store_id:
@@ -880,6 +890,9 @@ def profit_dashboard(
     recovered_leads = created_count(db, start, end, store_id, product_id, True)
     recovered_confirmed = confirmation_count(db, start, end, store_id, product_id, True)
     recovered_delivered = delivered_count(db, start, end, store_id, product_id, True)
+    backfilled_leads = created_count(db, start, end, store_id, product_id, False, BACKFILL_SOURCE)
+    backfilled_confirmed = confirmation_count(db, start, end, store_id, product_id, False, BACKFILL_SOURCE)
+    backfilled_delivered = delivered_count(db, start, end, store_id, product_id, False, BACKFILL_SOURCE)
     revenue_recovered_q = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(
         Order.delivery_status == "DELIVERED", Order.delivered_at.is_not(None), Order.delivered_at >= start, Order.delivered_at < end, Order.source == RECOVERY_SOURCE)
     if store_id:
@@ -905,6 +918,9 @@ def profit_dashboard(
         "recovered_leads": recovered_leads,
         "recovered_confirmed": recovered_confirmed,
         "recovered_delivered": recovered_delivered,
+        "backfilled_leads": backfilled_leads,
+        "backfilled_confirmed": backfilled_confirmed,
+        "backfilled_delivered": backfilled_delivered,
         # `revenue`/`delivered`/AOV cover ALL delivered orders; `leads`/`confirmed`/CPA cover acquired leads only.
         "revenue_recovered": str(revenue_recovered),
         "kpi_population": {"leads_confirmed_cpa": "acquisition_only", "revenue_delivered_aov_costs": "all_orders_incl_recovered"},

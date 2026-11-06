@@ -4,7 +4,7 @@ from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
-from app.core.sources import RECOVERY_SOURCE
+from app.core.sources import BACKFILL_SOURCE, HISTORICAL_SOURCES, RECOVERY_SOURCE
 from app.core.deps import require_roles
 from app.core.time import date_bounds
 from app.models import Order, PayoutEntry, Product, User
@@ -14,7 +14,7 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 
 def acquisition(query):
     """Acquisition view: historical recovered leads are not new customers acquired in this period."""
-    return query.filter(Order.source != RECOVERY_SOURCE)
+    return query.filter(Order.source.notin_(HISTORICAL_SOURCES))
 
 
 def pct(num: int | Decimal, den: int | Decimal) -> float:
@@ -33,6 +33,7 @@ def overview(
     q_all = db.query(Order).filter(Order.created_at >= start, Order.created_at < end)   # operational + financial view
     q = acquisition(q_all)                                                              # acquisition KPIs (no recovered leads)
     recovered = q_all.filter(Order.source == RECOVERY_SOURCE)
+    backfilled = q_all.filter(Order.source == BACKFILL_SOURCE)
     total = q.count()
     confirmed = q.filter(Order.call_status == "CONFIRMED").count()
     delivered = q.filter(Order.delivery_status == "DELIVERED").count()
@@ -40,8 +41,8 @@ def overview(
     confirmed_revenue = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.call_status == "CONFIRMED").scalar() or 0
     delivered_revenue = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.delivery_status == "DELIVERED").scalar() or 0
     payout_due = db.query(func.coalesce(func.sum(PayoutEntry.amount), 0)).filter(PayoutEntry.status == "UNPAID").scalar() or 0
-    confirmed_revenue_recovered = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.call_status == "CONFIRMED", Order.source == RECOVERY_SOURCE).scalar() or 0
-    delivered_revenue_recovered = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.delivery_status == "DELIVERED", Order.source == RECOVERY_SOURCE).scalar() or 0
+    confirmed_revenue_recovered = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.call_status == "CONFIRMED", Order.source.in_(HISTORICAL_SOURCES)).scalar() or 0
+    delivered_revenue_recovered = db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.created_at >= start, Order.created_at < end, Order.delivery_status == "DELIVERED", Order.source.in_(HISTORICAL_SOURCES)).scalar() or 0
     return {
         # Populations are NOT the same: counts/rates (leads, called, confirmed, delivered, status counts) cover ACQUIRED leads only;
         # revenue fields cover ALL orders including recovered ones. The *_recovered fields below give the difference explicitly.
@@ -56,6 +57,9 @@ def overview(
         "recovered_leads": recovered.count(),
         "recovered_unassigned": recovered.filter(Order.assigned_agent_id.is_(None)).count(),
         "recovered_confirmed": recovered.filter(Order.call_status == "CONFIRMED").count(),
+        "backfilled_leads": backfilled.count(),
+        "backfilled_unassigned": backfilled.filter(Order.assigned_agent_id.is_(None)).count(),
+        "backfilled_confirmed": backfilled.filter(Order.call_status == "CONFIRMED").count(),
         "called": called,
         "confirmed": confirmed,
         "confirmation_rate": pct(confirmed, total),
@@ -111,8 +115,9 @@ def product_breakdown(
             "delivery_rate": pct(delivered, confirmed),
             "refused": q.filter(Order.delivery_status == "REFUSED").count(),
             "delivered_revenue": str(revenue),    # financial: includes recovered orders once delivered
-            "delivered_revenue_recovered": str(db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.product_id == product.id, Order.created_at >= start, Order.created_at < end, Order.delivery_status == "DELIVERED", Order.source == RECOVERY_SOURCE).scalar() or 0),
+            "delivered_revenue_recovered": str(db.query(func.coalesce(func.sum(Order.total_price), 0)).filter(Order.product_id == product.id, Order.created_at >= start, Order.created_at < end, Order.delivery_status == "DELIVERED", Order.source.in_(HISTORICAL_SOURCES)).scalar() or 0),
             "recovered_leads": q_all.filter(Order.source == RECOVERY_SOURCE).count(),
+            "backfilled_leads": q_all.filter(Order.source == BACKFILL_SOURCE).count(),
         })
     return result
 
