@@ -21,7 +21,7 @@ from app.services.google_sheets import import_sheet_order
 
 ALIASES = {
     "sku": ["SKU", "Product SKU", "Lineitem sku", "Variant SKU"],
-    "customer_name": ["FULL NAME", "Full Name", "Name", "Customer Name", "Shipping Name"],
+    "customer_name": ["FULL NAME", "Full Name", "First Name", "Name", "Customer Name", "Shipping Name"],
     "phone": ["PHONE NUMBER", "Phone Number", "Phone", "Mobile", "Shipping Phone"],
     "city": ["CITY", "City", "Shipping City"],
     "address": ["ADDRESS", "Address", "Shipping Address", "Address1"],

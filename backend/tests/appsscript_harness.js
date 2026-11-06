@@ -101,6 +101,20 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
   assert.deepStrictEqual(fetched[fetched.length - 1].body.orders.map(o => o.row_number), [4]);
 }
 
+// ---------- Sheet-2 shape: "First Name" header, NO Order ID column, tab pinned by gid ----------
+{
+  const H = ['Product SKU', 'First Name', 'Phone', 'City', 'Product Quantity', 'Total Price', 'Product Name', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];
+  const sheet = makeSheet('orders', [H, ['TOPLUX-BSC-940-60', 'Sam', '0612121212', 'Fes', 2, 299, 'blood sugar', '', '', '', '']]);
+  sheet.getSheetId = () => 1490835622;
+  const other = makeSheet('easysell_abandoneds', [['x']]); other.getSheetId = () => 1708130206;
+  const { api, fetched } = boot({ orders: sheet, easysell_abandoneds: other }, body => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ results: body.orders.map(o => ({ row_number: o.row_number, status: 'IMPORTED', outcome: 'INSERTED', order_number: 'CC-X' })) }) }));
+  api.sendNewLeadsToCallCenter();
+  const o = fetched[0].body.orders[0];
+  assert.strictEqual(o.customer_name, 'Sam', 'First Name header is recognised'); assert.strictEqual(o.external_order_id, '', 'no Order ID column => no row-based identity');
+  assert.strictEqual(o.quantity, 2); assert.strictEqual(o.total_price, 299);
+  assert.strictEqual(sheet.data[1][7], 'IMPORTED'); assert.strictEqual(sheet.data[1][8], 'CC-X');
+}
+
 // ---------- targeted recovery: dry run writes nothing; apply sends only the listed rows ----------
 {
   const H = ['Order ID', 'Full Name', 'Phone', 'SKU', 'Product Quantity', 'Total Price', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];

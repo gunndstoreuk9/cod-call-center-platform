@@ -3,6 +3,8 @@
 const CALL_CENTER_WEBHOOK = __WEBHOOK__;
 const CALL_CENTER_TOKEN = __TOKEN__;
 const SOURCE_SHEET_NAME = __SHEET__;
+// Optional: pin the tab by its numeric id (the gid=... in the sheet URL) instead of its name. Leave '' to use SOURCE_SHEET_NAME.
+const SOURCE_SHEET_GID = '';
 const BATCH_SIZE = 150;
 
 const STATUS_HEADER = 'CALL CENTER IMPORT STATUS';
@@ -12,7 +14,7 @@ const HASH_HEADER = 'CALL CENTER ROW HASH';
 
 const HEADER_ALIASES = {
   sku: ['SKU', 'Product SKU', 'Lineitem sku', 'Variant SKU'],
-  customer_name: ['FULL NAME', 'Full Name', 'Name', 'Customer Name', 'Shipping Name'],
+  customer_name: ['FULL NAME', 'Full Name', 'First Name', 'Name', 'Customer Name', 'Shipping Name'],
   phone: ['PHONE NUMBER', 'Phone Number', 'Phone', 'Mobile', 'Shipping Phone'],
   city: ['CITY', 'City', 'Shipping City'],
   address: ['ADDRESS', 'Address', 'Shipping Address', 'Address1'],
@@ -84,7 +86,7 @@ function shouldSend_(status, orderNo, storedHash, currentHash, mode, nowMs) {
 function clientInfo_(ss) {
   const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, ss.getId());
   const hex = bytes.map(function (b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join('');
-  return { spreadsheet: hex.slice(0, 6), tab: SOURCE_SHEET_NAME, version: 'v2' };
+  return { spreadsheet: hex.slice(0, 6), tab: SOURCE_SHEET_GID ? 'gid ' + SOURCE_SHEET_GID : SOURCE_SHEET_NAME, version: 'v2' };
 }
 
 function syncLeads_(mode, opts) {
@@ -96,8 +98,10 @@ function syncLeads_(mode, opts) {
   if (!lock.tryLock(20000)) { console.log('Another sync is running; skipping this tick.'); return; }
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(SOURCE_SHEET_NAME);
-    if (!sheet) throw new Error('Sheet not found: ' + SOURCE_SHEET_NAME);
+    const sheet = SOURCE_SHEET_GID
+      ? ss.getSheets().filter(function (s) { return String(s.getSheetId()) === String(SOURCE_SHEET_GID); })[0]
+      : ss.getSheetByName(SOURCE_SHEET_NAME);
+    if (!sheet) throw new Error('Sheet not found: ' + (SOURCE_SHEET_GID ? 'gid ' + SOURCE_SHEET_GID : SOURCE_SHEET_NAME));
     const headers0 = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0].map(function (v) { return String(v || '').trim(); });
     const statusCol = ensureColumn(sheet, headers0, STATUS_HEADER);
     const orderCol = ensureColumn(sheet, headers0, ORDER_HEADER);

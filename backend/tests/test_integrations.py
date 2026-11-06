@@ -596,3 +596,26 @@ def test_api_counts_match_database_and_dashboard(client):
     assert after - before == n
     page = client.get('/api/v1/orders/paginated?limit=100&offset=0&search=Dash').json()
     assert (page['total'] if isinstance(page, dict) and 'total' in page else len(page)) >= n
+
+
+def test_source_identity_is_persisted_and_feed_silence_alert(client):
+    from datetime import timedelta
+    from app.core.db import SessionLocal
+    from app.models import IntegrationEvent
+    from app.core.time import utcnow
+    integ, send_ = _sheet_setup(client, ('SHEETS-SI1',))
+    script = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/script").json()
+    token = parse_qs(urlparse(script['webhook_url']).query)['token'][0]
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook"
+    r = client.post(url, json={'client': {'spreadsheet': 'abc123', 'tab': 'orders', 'version': 'v2'}, 'orders': [{'row_number': 7, 'sku': 'SHEETS-SI1', 'customer_name': 'Src', 'phone': '0676000001', 'external_order_id': 'si-1'}]}, headers={'X-Webhook-Token': token}).json()
+    assert r['results'][0]['outcome'] == 'INSERTED'
+    with SessionLocal() as db:
+        ev = db.query(IntegrationEvent).filter(IntegrationEvent.integration_id == integ['id'], IntegrationEvent.event_type == 'ORDER_IMPORT', IntegrationEvent.status == 'SUCCESS').one()
+        assert ev.payload['source'] == {'spreadsheet': 'abc123', 'tab': 'orders', 'version': 'v2'} and ev.payload['row_number'] == 7
+        # simulate a feed that delivered plenty of leads but has been silent for >24h
+        for i in range(10):
+            db.add(IntegrationEvent(integration_id=integ['id'], provider='GOOGLE_SHEETS', direction='INBOUND', event_type='BATCH_SUMMARY', status='SUCCESS',
+                                    payload={'received': 1, 'inserted': 1, 'rejected': 0, 'client': {'spreadsheet': 'quiet99', 'tab': 'orders', 'version': 'v2'}}, created_at=utcnow() - timedelta(hours=30 + i)))
+        db.commit()
+    st = client.get(f"/api/v1/integrations/google-sheets/{integ['id']}/sync-status").json()
+    assert any('quiet99/orders' in a and 'none in the last 24h' in a for a in st['alerts']), st['alerts']

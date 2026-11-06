@@ -383,11 +383,13 @@ def google_sheets_sync_status(
     ):
         c = (ev.payload or {}).get("client") or {}
         key = f"{c.get('spreadsheet', 'legacy-script')}/{c.get('tab', '?')}"
-        f = feeds.setdefault(key, {"batches": 0, "inserted": 0, "rejected": 0, "last_seen": None, "version": c.get("version")})
+        f = feeds.setdefault(key, {"batches": 0, "inserted": 0, "rejected": 0, "last_seen": None, "last_inserted_at": None, "version": c.get("version")})
         f["batches"] += 1
         f["inserted"] += int((ev.payload or {}).get("inserted") or 0)
         f["rejected"] += int((ev.payload or {}).get("rejected") or 0)
         f["last_seen"] = ev.created_at
+        if int((ev.payload or {}).get("inserted") or 0) > 0:
+            f["last_inserted_at"] = ev.created_at
     cfg = row.config or {}
     alerts: list[str] = []
     now = utcnow()
@@ -404,6 +406,9 @@ def google_sheets_sync_status(
     live = [k for k, f in feeds.items() if f["last_seen"] and (now - aware(f["last_seen"])).total_seconds() < 3600]
     if len(live) > 1:
         alerts.append(f"{len(live)} different feeds posted in the last hour: {', '.join(sorted(live))}")
+    for fk, f in feeds.items():
+        if fk != "legacy-script/?" and f["inserted"] >= 10 and f["last_inserted_at"] and (now - aware(f["last_inserted_at"])).total_seconds() > 24 * 3600:
+            alerts.append(f"Feed {fk} delivered {f['inserted']} leads this week but none in the last 24h: check its form/automation")
     if last_import is not None and (now - aware(last_import)).total_seconds() > 24 * 3600:
         alerts.append("No lead imported for over 24 hours")
     if last_batch and (last_batch.payload or {}).get("rejected", 0) > 50:
@@ -468,7 +473,10 @@ def google_sheets_webhook(
             continue
         try:
             with db.begin_nested() as sp:
-                result = import_sheet_order(db, row, item.model_dump())
+                item_data = item.model_dump()
+                if payload.client:   # persistent source identity: which spreadsheet/tab this lead came from
+                    item_data["source"] = {k: str(payload.client.get(k) or "")[:40] for k in ("spreadsheet", "tab", "version")}
+                result = import_sheet_order(db, row, item_data)
                 if dry_run:
                     sp.rollback()
                     if result.get("outcome") == "INSERTED":

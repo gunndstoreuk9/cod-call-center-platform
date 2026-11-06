@@ -140,7 +140,7 @@ def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) 
             db.flush()
             if agent:
                 db.add(OrderAssignment(order_id=row.id, agent_id=agent.id, assignment_type="SMART_SCORE"))
-            db.add(IntegrationEvent(integration_id=integration.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="ORDER_IMPORT", status="SUCCESS", entity_type="ORDER", entity_id=row.id, payload={"row_number": item.get("row_number"), "sku": sku, "external_order_id": external, "collision": collision}))
+            db.add(IntegrationEvent(integration_id=integration.id, provider="GOOGLE_SHEETS", direction="INBOUND", event_type="ORDER_IMPORT", status="SUCCESS", entity_type="ORDER", entity_id=row.id, payload={"row_number": item.get("row_number"), "sku": sku, "external_order_id": external, "collision": collision, "source": item.get("source")}))
             db.flush()
     except IntegrityError:
         # A concurrent request inserted the same lead first (unique index uq_orders_gsheets_ext). Never double-insert:
