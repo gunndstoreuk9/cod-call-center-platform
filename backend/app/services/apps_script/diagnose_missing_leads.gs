@@ -296,3 +296,38 @@ function listCallCenterTriggers() {
   out.push('Nothing was changed.');
   Logger.log(out.join('\n'));
 }
+
+
+/**
+ * READ-ONLY project backup report. Run BEFORE any cutover and keep the log (it is the record of the old setup).
+ * Prints: spreadsheet identity, time zone, every tab (name, gid, size, headers), every trigger definition, script-property KEYS (never values),
+ * and the importer constants if present (webhook host masked, token only as a fingerprint). Changes nothing.
+ * It cannot export source code: copy the old importer into a file named OLD_importer_backup (instructions in V2_CUTOVER_PLAN.md).
+ */
+function backupProjectState() {
+  var out = [];
+  function hex(bytes) { return bytes.map(function (b) { return ('0' + (b < 0 ? b + 256 : b).toString(16)).slice(-2); }).join(''); }
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  out.push('=== backupProjectState (READ-ONLY) @ ' + new Date().toISOString() + ' ===');
+  out.push('Spreadsheet: "' + ss.getName() + '" | id-hash ' + hex(Utilities.computeDigest(Utilities.DigestAlgorithm.MD5, ss.getId())).slice(0, 6) + ' | time zone ' + ss.getSpreadsheetTimeZone());
+  ss.getSheets().forEach(function (s) {
+    var lastCol = Math.max(s.getLastColumn(), 1);
+    var headers = s.getLastRow() >= 1 ? s.getRange(1, 1, 1, lastCol).getValues()[0].map(function (v) { return String(v || ''); }) : [];
+    out.push('Tab "' + s.getName() + '" gid ' + s.getSheetId() + ' | data rows ' + Math.max(s.getLastRow() - 1, 0) + ' | columns ' + s.getLastColumn() + ' | headers: ' + headers.join(' | '));
+  });
+  var triggers = ScriptApp.getProjectTriggers();
+  out.push('Triggers (' + triggers.length + '):');
+  triggers.forEach(function (t) { out.push('  - handler ' + t.getHandlerFunction() + ' | event ' + t.getEventType() + ' | source ' + t.getTriggerSource() + ' | id ' + t.getUniqueId()); });
+  out.push('Script property keys: ' + Object.keys(PropertiesService.getScriptProperties().getProperties()).join(', '));
+  var consts = [];
+  if (typeof SOURCE_SHEET_NAME !== 'undefined') consts.push('SOURCE_SHEET_NAME=' + SOURCE_SHEET_NAME);
+  if (typeof SOURCE_SHEET_GID !== 'undefined') consts.push('SOURCE_SHEET_GID=' + SOURCE_SHEET_GID);
+  if (typeof EXPECTED_SPREADSHEET_PREFIX !== 'undefined') consts.push('EXPECTED_SPREADSHEET_PREFIX=' + EXPECTED_SPREADSHEET_PREFIX);
+  if (typeof HOLD_ROWS !== 'undefined') consts.push('HOLD_ROWS=[' + HOLD_ROWS.join(',') + ']');
+  if (typeof CALL_CENTER_WEBHOOK !== 'undefined') consts.push('webhook=' + CALL_CENTER_WEBHOOK.replace(/\?.*$/, '').replace(/(integrations\/google-sheets\/)(.{6}).*(\/webhook)$/, '$1$2...$3') + (/[?&]token=/.test(CALL_CENTER_WEBHOOK) ? ' (TOKEN IN URL)' : ''));
+  var tok = (typeof CALL_CENTER_TOKEN !== 'undefined') ? CALL_CENTER_TOKEN : ((typeof CALL_CENTER_WEBHOOK !== 'undefined' && CALL_CENTER_WEBHOOK.match(/token=([^&]+)/)) ? CALL_CENTER_WEBHOOK.match(/token=([^&]+)/)[1] : null);
+  consts.push('token fingerprint=' + (tok ? hex(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, tok)).slice(0, 8) : 'none'));
+  out.push('Importer constants: ' + consts.join(' | '));
+  out.push('=== end (nothing changed) ===');
+  Logger.log(out.join('\n'));
+}

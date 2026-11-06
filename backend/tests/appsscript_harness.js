@@ -115,6 +115,33 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
   assert.strictEqual(sheet.data[1][7], 'IMPORTED'); assert.strictEqual(sheet.data[1][8], 'CC-X');
 }
 
+// ---------- cutover safeguards: wrong-spreadsheet guard, missing-header failure, held rows, heartbeat, failure recording ----------
+{
+  const H = ['Product SKU', 'First Name', 'Phone', 'City', 'Product Quantity', 'Total Price', 'Product Name', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];
+  const mk = () => makeSheet('orders', [H, ['SKU1', 'Held', '0611111111', 'X', 1, 199, 'p', 'ERROR', '', 'Product SKU not found: (empty)', ''], ['SKU1', 'Go', '0622222222', 'X', 2, 249, 'p', '', '', '', '']]);
+  const ok = body => ({ getResponseCode: () => 200, getContentText: () => JSON.stringify({ results: body.orders.map(o => ({ row_number: o.row_number, status: 'IMPORTED', outcome: 'INSERTED', order_number: 'CC-N' })) }) });
+  function bootCustom(replace, sheets, fetchImpl) {
+    const saved = require('fs').readFileSync(process.argv[2], 'utf8'); let t = saved; Object.keys(replace).forEach(k => { assert.ok(t.includes(k), 'missing ' + k); t = t.replace(k, replace[k]); });
+    return boot(sheets, fetchImpl, '', t);
+  }
+  // 1) HOLD_ROWS: held row 2 is never sent or modified; row 3 goes out
+  { const sheet = mk(); const { api, fetched } = bootCustom({ 'const HOLD_ROWS = [];': 'const HOLD_ROWS = [2];' }, { orders: sheet }, ok);
+    api.sendNewLeadsToCallCenter();
+    assert.deepStrictEqual(fetched[0].body.orders.map(o => o.row_number), [3]); assert.strictEqual(sheet.data[1][7], 'ERROR', 'held row untouched'); assert.strictEqual(sheet.data[1][9], 'Product SKU not found: (empty)'); }
+  // 2) wrong spreadsheet: refuses to run, sends nothing, records LAST_ERROR
+  { const sheet = mk(); const { api, fetched, props } = bootCustom({ "const EXPECTED_SPREADSHEET_PREFIX = '';": "const EXPECTED_SPREADSHEET_PREFIX = 'aaaaaa';" }, { orders: sheet }, ok);
+    assert.throws(() => api.sendNewLeadsToCallCenter(), /Wrong spreadsheet/); assert.strictEqual(fetched.length, 0); assert.ok(JSON.parse(props.LAST_ERROR).message.includes('Wrong spreadsheet')); }
+  // 3) a renamed/missing required header fails loudly instead of skipping every row
+  { const sheet = makeSheet('orders', [['Product SKU', 'Nombre', 'Phone', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'], ['SKU1', 'Go', '0622222222', '', '', '', '']]);
+    const { api, fetched, props } = bootCustom({}, { orders: sheet }, ok);
+    assert.throws(() => api.sendNewLeadsToCallCenter(), /Required column not found for "customer_name"/); assert.strictEqual(fetched.length, 0); assert.strictEqual(sheet.writes.length, 0, 'nothing written'); assert.ok(props.LAST_ERROR); }
+  // 4) heartbeat: idle feed pings CODOPS (empty batch) at most every PING_MINUTES
+  { const sheet = makeSheet('orders', [H, ['SKU1', 'Done', '0633333333', 'X', 1, 199, 'p', 'IMPORTED', 'CC-1', '', '']]);
+    const { api, fetched, props } = bootCustom({}, { orders: sheet }, ok);
+    api.sendNewLeadsToCallCenter(); assert.strictEqual(fetched.length, 1); assert.deepStrictEqual(fetched[0].body.orders, []); assert.ok(fetched[0].body.client.spreadsheet);
+    api.sendNewLeadsToCallCenter(); assert.strictEqual(fetched.length, 1, 'no second ping within the interval'); assert.ok(props.LAST_PING); }
+}
+
 // ---------- targeted recovery: dry run writes nothing; apply sends only the listed rows ----------
 {
   const H = ['Order ID', 'Full Name', 'Phone', 'SKU', 'Product Quantity', 'Total Price', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];

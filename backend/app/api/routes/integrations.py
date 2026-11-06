@@ -356,64 +356,76 @@ def list_events(
 @router.get("/google-sheets/{integration_id}/sync-status")
 def google_sheets_sync_status(
     integration_id: str,
+    expect: str | None = Query(default=None, description="comma-separated feed ids (spreadsheet md5 prefixes) that must be alive"),
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("OWNER", "ADMIN", "SUPERVISOR")),
 ):
-    """Read-only health view: last successful import, per-day imported counts and the latest failure reasons."""
+    """Read-only health view: last successful import, per-day imported counts, per-feed liveness and actionable alerts."""
     from datetime import timedelta, timezone
     from zoneinfo import ZoneInfo
+    from sqlalchemy import case
     row = _integration_or_404(db, integration_id, "GOOGLE_SHEETS")
     tz = ZoneInfo(settings.timezone)
-    since = utcnow() - timedelta(days=8)
-    created = [c for (c,) in db.query(Order.created_at).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id, Order.created_at >= since).all()]
-    per_day: dict[str, int] = {}
-    for c in created:
-        key = c.astimezone(tz).date().isoformat()
-        per_day[key] = per_day.get(key, 0) + 1
-    last_import = db.query(func.max(Order.created_at)).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id).scalar()
-    last_batch = (
-        db.query(IntegrationEvent)
-        .filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY")
-        .order_by(IntegrationEvent.created_at.desc()).first()
-    )
-    feeds: dict[str, dict] = {}
-    for ev in (
-        db.query(IntegrationEvent)
-        .filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY", IntegrationEvent.created_at >= utcnow() - timedelta(days=7))
-        .order_by(IntegrationEvent.created_at.asc()).limit(5000).all()
-    ):
-        c = (ev.payload or {}).get("client") or {}
-        key = f"{c.get('spreadsheet', 'legacy-script')}/{c.get('tab', '?')}"
-        f = feeds.setdefault(key, {"batches": 0, "inserted": 0, "rejected": 0, "last_seen": None, "last_inserted_at": None, "version": c.get("version")})
-        f["batches"] += 1
-        f["inserted"] += int((ev.payload or {}).get("inserted") or 0)
-        f["rejected"] += int((ev.payload or {}).get("rejected") or 0)
-        f["last_seen"] = ev.created_at
-        if int((ev.payload or {}).get("inserted") or 0) > 0:
-            f["last_inserted_at"] = ev.created_at
-    cfg = row.config or {}
-    alerts: list[str] = []
     now = utcnow()
 
     def aware(dt):
         return dt if dt is None or dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
+    created = [c for (c,) in db.query(Order.created_at).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id, Order.created_at >= now - timedelta(days=8)).all()]
+    per_day: dict[str, int] = {}
+    for c in created:
+        key = c.astimezone(tz).date().isoformat()
+        per_day[key] = per_day.get(key, 0) + 1
+    last_import = db.query(func.max(Order.created_at)).filter(Order.source == "GOOGLE_SHEETS", Order.store_id == row.store_id).scalar()
+    base_q = db.query(IntegrationEvent).filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY")
+    last_batch = base_q.order_by(IntegrationEvent.created_at.desc()).first()
+    last_v2 = base_q.filter(IntegrationEvent.payload["client"]["version"].as_string() == "v2").order_by(IntegrationEvent.created_at.desc()).first()
+
+    # Per-feed liveness, aggregated in SQL (legacy scripts alone produce thousands of batches per day).
+    cl = IntegrationEvent.payload["client"]
+    sp, tb, vr = cl["spreadsheet"].as_string(), cl["tab"].as_string(), cl["version"].as_string()
+    ins, rej = IntegrationEvent.payload["inserted"].as_integer(), IntegrationEvent.payload["rejected"].as_integer()
+    agg = (
+        db.query(sp.label("sp"), tb.label("tb"), vr.label("vr"), func.count().label("n"), func.max(IntegrationEvent.created_at).label("last"),
+                 func.coalesce(func.sum(ins), 0).label("ins"), func.coalesce(func.sum(rej), 0).label("rej"), func.max(case((ins > 0, IntegrationEvent.created_at))).label("last_ins"))
+        .filter(IntegrationEvent.integration_id == row.id, IntegrationEvent.event_type == "BATCH_SUMMARY", IntegrationEvent.created_at >= now - timedelta(days=7))
+        .group_by(sp, tb, vr).all()
+    )
+    feeds: dict[str, dict] = {}
+    for a in agg:
+        key = f"{a.sp or 'legacy-script'}/{a.tb or '?'}"
+        f = feeds.setdefault(key, {"batches": 0, "inserted": 0, "rejected": 0, "last_seen": None, "last_inserted_at": None, "version": a.vr})
+        f["batches"] += a.n; f["inserted"] += int(a.ins or 0); f["rejected"] += int(a.rej or 0)
+        f["last_seen"] = max([x for x in (f["last_seen"], a.last) if x is not None], default=None, key=aware)
+        f["last_inserted_at"] = max([x for x in (f["last_inserted_at"], a.last_ins) if x is not None], default=None, key=aware)
+    cfg = row.config or {}
+    alerts: list[str] = []
+    age_min = lambda dt: int((now - aware(dt)).total_seconds() // 60)
     if not row.is_active:
         alerts.append("Integration is disabled")
     if cfg.get("sheet_name") != "orders":
         alerts.append("Configured sheet_name is not 'orders'")
-    if "legacy-script/?" in feeds:
-        alerts.append("A legacy script (no feed identity) is still posting; replace it with the v2 script")
-    live = [k for k, f in feeds.items() if f["last_seen"] and (now - aware(f["last_seen"])).total_seconds() < 3600]
-    if len(live) > 1:
-        alerts.append(f"{len(live)} different feeds posted in the last hour: {', '.join(sorted(live))}")
+    legacy = feeds.get("legacy-script/?")
+    if legacy and legacy["last_seen"] and age_min(legacy["last_seen"]) < 60:
+        alerts.append("INFO: legacy scripts (no feed identity) are still posting; remove their triggers once the v2 scripts are confirmed")
     for fk, f in feeds.items():
-        if fk != "legacy-script/?" and f["inserted"] >= 10 and f["last_inserted_at"] and (now - aware(f["last_inserted_at"])).total_seconds() > 24 * 3600:
+        if fk == "legacy-script/?":
+            continue
+        # heartbeat: v2 scripts ping every <=30 minutes even when idle
+        if f["version"] == "v2" and f["last_seen"] and age_min(f["last_seen"]) > 90:
+            alerts.append(f"Feed {fk}: no contact for {age_min(f['last_seen'])} minutes (script stopped, trigger removed or authorization expired)")
+        if f["inserted"] >= 10 and f["last_inserted_at"] and age_min(f["last_inserted_at"]) > 24 * 60:
             alerts.append(f"Feed {fk} delivered {f['inserted']} leads this week but none in the last 24h: check its form/automation")
-    if last_import is not None and (now - aware(last_import)).total_seconds() > 24 * 3600:
+    for want in [x.strip() for x in (expect or "").split(",") if x.strip()]:
+        seen = [f for fk, f in feeds.items() if fk.startswith(want + "/") and f["last_seen"]]
+        if not seen:
+            alerts.append(f"Expected feed {want} has not contacted CODOPS in the last 7 days")
+        elif age_min(max((f["last_seen"] for f in seen), key=aware)) > 90:
+            alerts.append(f"Expected feed {want}: last contact {age_min(max((f['last_seen'] for f in seen), key=aware))} minutes ago")
+    if last_import is not None and age_min(last_import) > 24 * 60:
         alerts.append("No lead imported for over 24 hours")
-    if last_batch and (last_batch.payload or {}).get("rejected", 0) > 50:
-        alerts.append(f"Last batch rejected {(last_batch.payload or {}).get('rejected')} rows (see failure_reasons)")
+    if last_v2 and ((last_v2.payload or {}).get("transient_failed", 0) > 0 or (last_v2.payload or {}).get("rejected", 0) > 50):
+        alerts.append(f"Last v2 batch had {(last_v2.payload or {}).get('transient_failed', 0)} transient failures / {(last_v2.payload or {}).get('rejected', 0)} rejected rows (see failure_reasons)")
     return {
         "integration_id": row.id,
         "sheet_name": cfg.get("sheet_name"),

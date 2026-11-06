@@ -6,6 +6,13 @@ const SOURCE_SHEET_NAME = __SHEET__;
 // Optional: pin the tab by its numeric id (the gid=... in the sheet URL) instead of its name. Leave '' to use SOURCE_SHEET_NAME.
 const SOURCE_SHEET_GID = '';
 const BATCH_SIZE = 150;
+// Safety guard: the md5 prefix (6 hex) of THIS spreadsheet's id. If set and it does not match, the script refuses to run
+// (stops a script pasted into the wrong spreadsheet). Leave '' to disable.
+const EXPECTED_SPREADSHEET_PREFIX = '';
+// Row numbers this script must never touch (e.g. a lead waiting for a product decision). They are not sent and not modified.
+const HOLD_ROWS = [];
+// Heartbeat: when there is nothing to send, ping CODOPS at most this often so a dead script can be told apart from a quiet feed.
+const PING_MINUTES = 30;
 
 const STATUS_HEADER = 'CALL CENTER IMPORT STATUS';
 const ORDER_HEADER = 'CALL CENTER ORDER ID';
@@ -102,14 +109,22 @@ function syncLeads_(mode, opts) {
       ? ss.getSheets().filter(function (s) { return String(s.getSheetId()) === String(SOURCE_SHEET_GID); })[0]
       : ss.getSheetByName(SOURCE_SHEET_NAME);
     if (!sheet) throw new Error('Sheet not found: ' + (SOURCE_SHEET_GID ? 'gid ' + SOURCE_SHEET_GID : SOURCE_SHEET_NAME));
+    const clientNow = clientInfo_(ss);
+    if (EXPECTED_SPREADSHEET_PREFIX && clientNow.spreadsheet !== EXPECTED_SPREADSHEET_PREFIX) {
+      throw new Error('Wrong spreadsheet: this script is for ' + EXPECTED_SPREADSHEET_PREFIX + ' but runs in ' + clientNow.spreadsheet);
+    }
     const headers0 = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0].map(function (v) { return String(v || '').trim(); });
+    // Fail fast instead of silently skipping every row when a required column is renamed or missing.
+    ['customer_name', 'phone', 'sku'].forEach(function (k) {
+      if (headerIndex(headers0, HEADER_ALIASES[k]) < 0) throw new Error('Required column not found for "' + k + '". Headers seen: ' + headers0.join(' | ') + '. Accepted: ' + HEADER_ALIASES[k].join(' | '));
+    });
     const statusCol = ensureColumn(sheet, headers0, STATUS_HEADER);
     const orderCol = ensureColumn(sheet, headers0, ORDER_HEADER);
     const errorCol = ensureColumn(sheet, headers0, ERROR_HEADER);
     const hashCol = ensureColumn(sheet, headers0, HASH_HEADER);
     SpreadsheetApp.flush();
     const values = sheet.getDataRange().getValues();   // read AFTER the helper columns exist
-    if (values.length < 2) return;
+    if (values.length < 2) { maybePing_(ss, false); return; }
     const headers = values[0].map(function (v) { return String(v || '').trim(); });
 
     const stats = { sent: 0, inserted: 0, duplicate: 0, rejected: 0, failed: 0, skipped: 0, unchanged: 0, collisions: 0 };
@@ -127,6 +142,7 @@ function syncLeads_(mode, opts) {
       const row = values[r];
       if (!row.some(function (v) { return String(v || '').trim() !== ''; })) continue;
       const rowNumber = r + 1;
+      if (HOLD_ROWS.indexOf(rowNumber) >= 0) { stats.held = (stats.held || 0) + 1; continue; }   // never touch held rows
       if (onlyRows && !onlyRows[rowNumber]) continue;      // targeted recovery: only the listed rows
       const phone = String(getCell(row, headers, 'phone') || '').trim();
       const customer = String(getCell(row, headers, 'customer_name') || '').trim();
@@ -185,6 +201,7 @@ function syncLeads_(mode, opts) {
         else { stats.failed++; put(rowNumber, 'ERROR', '', String(res.error || 'Unknown error'), nextRetryState_(byRow[rowNumber] ? byRow[rowNumber].storedHash : '', Date.now())); }
       });
     }
+    if (!dryRun) maybePing_(ss, stats.sent > 0);
     stats.mode = mode; stats.at = new Date().toISOString(); stats.dryRun = dryRun;
     if (!dryRun) PropertiesService.getScriptProperties().setProperty('LAST_SYNC', JSON.stringify(stats));
     console.log((dryRun ? 'DRY RUN (nothing written to CODOPS or the sheet) ' : 'SYNC ') + JSON.stringify(stats));
@@ -194,7 +211,24 @@ function syncLeads_(mode, opts) {
   }
 }
 
-function sendNewLeadsToCallCenter() { syncLeads_('normal'); }
+// Heartbeat to CODOPS (empty batch). Skipped when a real batch was just sent, or when the last ping is recent.
+function maybePing_(ss, justSent) {
+  const props = PropertiesService.getScriptProperties();
+  const now = Date.now();
+  if (justSent) { props.setProperty('LAST_PING', String(now)); return; }
+  if (now - Number(props.getProperty('LAST_PING') || 0) < PING_MINUTES * 60000) return;
+  const r = UrlFetchApp.fetch(CALL_CENTER_WEBHOOK, { method: 'post', contentType: 'application/json', headers: { 'X-Webhook-Token': CALL_CENTER_TOKEN },
+    payload: JSON.stringify({ client: clientInfo_(ss), orders: [] }), muteHttpExceptions: true });
+  if (r.getResponseCode() >= 200 && r.getResponseCode() < 300) props.setProperty('LAST_PING', String(now));
+}
+
+// Failures are stored (LAST_ERROR, readable with showLastSync) and re-thrown so the execution is marked FAILED and Apps Script's
+// own trigger-failure notification fires (Triggers page > failure notification settings).
+function recordFailure_(e) {
+  try { PropertiesService.getScriptProperties().setProperty('LAST_ERROR', JSON.stringify({ at: new Date().toISOString(), message: String(e && e.message || e).slice(0, 500) })); } catch (x) {}
+}
+
+function sendNewLeadsToCallCenter() { try { syncLeads_('normal'); } catch (e) { recordFailure_(e); throw e; } }
 // Controlled retry for REJECTED rows (run after adding the missing product / fixing the SKU mapping).
 function retryRejectedRowsToCallCenter() { syncLeads_('retryRejected'); }
 // Recovery: re-sends EVERY row. Server is idempotent (stable id / fingerprint), so existing orders are never duplicated or modified.
@@ -209,7 +243,10 @@ function runRecovery_(rows, dryRun) {
 }
 function recoveryDryRun() { runRecovery_(RECOVERY_ROWS, true); }
 function recoveryApply() { runRecovery_(RECOVERY_ROWS, false); }
-function showLastSync() { console.log(PropertiesService.getScriptProperties().getProperty('LAST_SYNC') || 'No sync recorded yet'); }
+function showLastSync() {
+  const p = PropertiesService.getScriptProperties();
+  console.log('LAST_SYNC: ' + (p.getProperty('LAST_SYNC') || 'none yet') + ' | LAST_ERROR: ' + (p.getProperty('LAST_ERROR') || 'none') + ' | LAST_PING: ' + (p.getProperty('LAST_PING') ? new Date(Number(p.getProperty('LAST_PING'))).toISOString() : 'none'));
+}
 
 function installEveryMinuteTrigger() {
   ScriptApp.getProjectTriggers().filter(function (t) { return t.getHandlerFunction() === 'sendNewLeadsToCallCenter'; }).forEach(function (t) { ScriptApp.deleteTrigger(t); });

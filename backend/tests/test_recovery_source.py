@@ -199,3 +199,53 @@ def test_revenue_and_count_populations_are_explicit_in_the_api(client):
     assert float(o['confirmed_revenue']) == float(o['confirmed_revenue_acquisition']) + float(o['confirmed_revenue_recovered'])
     p = client.get('/api/v1/profit/dashboard?range=today').json()
     assert p['kpi_population']['leads_confirmed_cpa'] == 'acquisition_only' and 'revenue_recovered' in p
+
+
+def test_resend_after_quantity_total_alias_fix_is_still_a_duplicate(client):
+    """Orders imported by the old script (quantity 1, no total) must be recognised when V2 re-sends the same lead with real values."""
+    integ, token = _setup(client, 'REC-SKU-8')
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/webhook"
+    post = lambda o: client.post(url, json={'orders': [o]}, headers={'X-Webhook-Token': token}).json()['results'][0]
+    # 1) blank-id lead (Sheet-2 shape)
+    old = {'row_number': 4, 'sku': 'REC-SKU-8', 'customer_name': 'Alias Fix', 'phone': '0694000001', 'city': 'Fes'}                      # old script: qty 1, no total
+    assert post(old)['outcome'] == 'INSERTED'
+    new = {**old, 'quantity': 2, 'total_price': 249}                                                                                    # V2: real values
+    assert post(new)['outcome'] == 'DUPLICATE'
+    # 2) id-collision lead (Sheet-1 shape): two customers share an id, imported by the old script
+    a = {'row_number': 5, 'sku': 'REC-SKU-8', 'customer_name': 'First', 'phone': '0694000002', 'external_order_id': 'AF-1'}
+    b = {'row_number': 6, 'sku': 'REC-SKU-8', 'customer_name': 'Second', 'phone': '0694000003', 'external_order_id': 'AF-1'}
+    assert post(a)['outcome'] == 'INSERTED' and post(b)['outcome'] == 'INSERTED' and post(b)['outcome'] == 'DUPLICATE'
+    assert post({**a, 'quantity': 3, 'total_price': 299})['outcome'] == 'DUPLICATE'
+    assert post({**b, 'quantity': 3, 'total_price': 299})['outcome'] == 'DUPLICATE'      # corrected values must NOT mint a new derived id
+    with SessionLocal() as s:
+        assert s.query(Order).filter(Order.external_order_id.like('AF-1%')).count() == 2
+        assert s.query(Order).filter(Order.customer_id == s.query(Order.customer_id).filter(Order.external_order_id == 'AF-1').scalar()).count() == 1
+    # 3) a genuinely different lead (other customer / other SKU) is still imported
+    assert post({**b, 'phone': '0694000009', 'customer_name': 'Third'})['outcome'] == 'INSERTED'
+
+
+def test_sync_status_feed_liveness_heartbeat_and_expected_feeds_with_legacy_noise(client):
+    from datetime import timedelta
+    from app.models import IntegrationEvent
+    integ, token = _setup(client, 'REC-SKU-9')
+    url = f"/api/v1/integrations/google-sheets/{integ['id']}/sync-status"
+    with SessionLocal() as s:
+        # lots of legacy-script batches (no feed identity) must not hide the v2 feeds (old code loaded only the oldest 5000 rows)
+        for i in range(60):
+            s.add(IntegrationEvent(integration_id=integ['id'], provider='GOOGLE_SHEETS', direction='INBOUND', event_type='BATCH_SUMMARY', status='FAILED', payload={'received': 267, 'inserted': 0, 'rejected': 267}, created_at=utcnow() - timedelta(days=6, minutes=i)))
+        s.add(IntegrationEvent(integration_id=integ['id'], provider='GOOGLE_SHEETS', direction='INBOUND', event_type='BATCH_SUMMARY', status='SUCCESS', payload={'received': 0, 'inserted': 0, 'rejected': 0, 'client': {'spreadsheet': 'b1819f', 'tab': 'gid 1', 'version': 'v2'}}, created_at=utcnow() - timedelta(minutes=5)))
+        s.add(IntegrationEvent(integration_id=integ['id'], provider='GOOGLE_SHEETS', direction='INBOUND', event_type='BATCH_SUMMARY', status='SUCCESS', payload={'received': 0, 'inserted': 0, 'rejected': 0, 'client': {'spreadsheet': '66800c', 'tab': 'gid 2', 'version': 'v2'}}, created_at=utcnow() - timedelta(minutes=200)))
+        s.commit()
+    st = client.get(url + '?expect=b1819f,66800c,ffffff').json()
+    assert 'b1819f/gid 1' in st['feeds_last_7_days'] and st['feeds_last_7_days']['b1819f/gid 1']['version'] == 'v2'
+    assert not any('b1819f' in a and 'no contact' in a for a in st['alerts'])                       # fresh heartbeat => healthy
+    assert any('66800c' in a and 'no contact for' in a for a in st['alerts'])                         # 200 min silent => alert
+    assert any('Expected feed ffffff has not contacted' in a for a in st['alerts'])                  # never seen
+
+
+def test_monitor_cli_exit_semantics(client):
+    from scripts.monitor_sync import check
+    db = SessionLocal()
+    out = check(db, None)                      # test DB has many integrations => monitor refuses to guess
+    assert out['critical'] and 'exactly one' in out['error']
+    db.close()

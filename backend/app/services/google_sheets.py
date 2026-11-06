@@ -89,6 +89,9 @@ def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) 
     total = Decimal(str(item.get("total_price"))) if item.get("total_price") not in (None, "") else None
     name = _fit(item.get("customer_name") or "Customer", 160)
     fp = lead_fingerprint(store.id, phone, sku, qty, total, name, item.get("lead_date"))
+    # Scripts before the Product Quantity / Total Price alias fix always sent quantity=1 and no total, so orders imported then carry
+    # a fingerprint computed from those values. Match them too, otherwise re-sending the same lead would create a duplicate.
+    fp_legacy = lead_fingerprint(store.id, phone, sku, 1, None, name, item.get("lead_date"))
 
     # ---- identity / idempotency -------------------------------------------------
     supplied = str(item.get("external_order_id") or "").strip()[:140]
@@ -99,18 +102,24 @@ def import_sheet_order(db: Session, integration: IntegrationConfig, item: dict) 
     if supplied and not legacy_row_id:
         external = supplied
         existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+        base = external[:125]
+        # Orders that already carry a derived id "<id>~<fingerprint>" for this same customer+SKU are the same lead,
+        # whichever fingerprint (old or corrected quantity/total) produced that suffix.
+        for derived in db.query(Order).filter(Order.store_id == store.id, Order.external_order_id.startswith(base + "~", autoescape=True)).all():
+            if _same_lead(db, derived, phone, sku):
+                return _duplicate(item, derived)
         if existing:
             if _same_lead(db, existing, phone, sku):
                 return _duplicate(item, existing)
             # Same id, different lead: do NOT drop it. Give it a derived, still-deterministic id.
             collision = True
-            external = f"{external[:125]}~{fp[:10]}"
+            external = f"{base}~{fp[:10]}"
             again = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
             if again:
                 return _duplicate(item, again)
     else:
         external = f"fp:{fp}"
-        existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id == external).first()
+        existing = db.query(Order).filter(Order.store_id == store.id, Order.external_order_id.in_([external, f"fp:{fp_legacy}"])).first()
         if existing:
             return _duplicate(item, existing)
         # Orders imported earlier under a row-position id: same lead only if phone matches.
