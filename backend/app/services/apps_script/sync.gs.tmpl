@@ -87,7 +87,11 @@ function clientInfo_(ss) {
   return { spreadsheet: hex.slice(0, 6), tab: SOURCE_SHEET_NAME, version: 'v2' };
 }
 
-function syncLeads_(mode) {
+function syncLeads_(mode, opts) {
+  opts = opts || {};
+  const onlyRows = opts.rows ? opts.rows.reduce(function (m, n) { m[n] = true; return m; }, {}) : null;
+  const dryRun = !!opts.dryRun;
+  const report = [];
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(20000)) { console.log('Another sync is running; skipping this tick.'); return; }
   try {
@@ -107,6 +111,7 @@ function syncLeads_(mode) {
     const stats = { sent: 0, inserted: 0, duplicate: 0, rejected: 0, failed: 0, skipped: 0, unchanged: 0, collisions: 0 };
     const pending = [];
     function put(rowNumber, status, orderNo, error, hash) {
+      if (dryRun) return;                                  // dry run NEVER writes to the sheet
       const cur = values[rowNumber - 1] || [];
       if (String(cur[statusCol - 1] || '') !== status) sheet.getRange(rowNumber, statusCol).setValue(status);
       if (orderNo !== null && String(cur[orderCol - 1] || '') !== orderNo) sheet.getRange(rowNumber, orderCol).setValue(orderNo);
@@ -118,6 +123,7 @@ function syncLeads_(mode) {
       const row = values[r];
       if (!row.some(function (v) { return String(v || '').trim() !== ''; })) continue;
       const rowNumber = r + 1;
+      if (onlyRows && !onlyRows[rowNumber]) continue;      // targeted recovery: only the listed rows
       const phone = String(getCell(row, headers, 'phone') || '').trim();
       const customer = String(getCell(row, headers, 'customer_name') || '').trim();
       if (!phone || !customer) {
@@ -131,7 +137,7 @@ function syncLeads_(mode) {
       const total = totalRaw === '' ? null : Number(totalRaw);
       const hash = rowHash_(sku, phone, customer, qty, total);
       const status = row[statusCol - 1], orderNo = row[orderCol - 1], storedHash = row[hashCol - 1];
-      if (!shouldSend_(status, orderNo, storedHash, hash, mode, Date.now())) { stats.unchanged++; continue; }
+      if (!onlyRows && !shouldSend_(status, orderNo, storedHash, hash, mode, Date.now())) { stats.unchanged++; continue; }
       const dateRaw = getCell(row, headers, 'lead_date');
       pending.push({
         rowNumber: rowNumber, hash: hash, storedHash: String(storedHash || ''),
@@ -152,7 +158,7 @@ function syncLeads_(mode) {
     for (let i = 0; i < pending.length; i += BATCH_SIZE) {
       if (Date.now() - startedAt > 240000) { stats.deferred = pending.length - i; break; }  // stay under the 6-minute Apps Script limit; the rest goes out next tick
       const chunk = pending.slice(i, i + BATCH_SIZE);
-      const response = UrlFetchApp.fetch(CALL_CENTER_WEBHOOK, {
+      const response = UrlFetchApp.fetch(CALL_CENTER_WEBHOOK + (dryRun ? '?dry_run=true' : ''), {
         method: 'post', contentType: 'application/json', headers: { 'X-Webhook-Token': CALL_CENTER_TOKEN },
         payload: JSON.stringify({ client: clientInfo_(ss), orders: chunk.map(function (c) { return c.payload; }) }), muteHttpExceptions: true
       });
@@ -166,6 +172,8 @@ function syncLeads_(mode) {
         const rowNumber = Number(res.row_number);
         if (!rowNumber) return;
         const outcome = res.outcome || (res.status === 'IMPORTED' ? 'INSERTED' : 'FAILED');
+        if (opts.rows) report.push('row ' + rowNumber + ': ' + outcome + (res.order_number ? ' ' + res.order_number : '') + (res.collision ? ' (id collision -> derived id)' : '') + (res.error ? ' - ' + String(res.error).slice(0, 80) : ''));
+        if (dryRun) { stats[outcome === 'WOULD_INSERT' ? 'would_insert' : outcome === 'DUPLICATE' ? 'duplicate' : outcome === 'REJECTED' ? 'rejected' : 'failed'] = (stats[outcome === 'WOULD_INSERT' ? 'would_insert' : outcome === 'DUPLICATE' ? 'duplicate' : outcome === 'REJECTED' ? 'rejected' : 'failed'] || 0) + 1; return; }
         const orderRef = String(res.order_number || res.order_id || '');
         if (outcome === 'INSERTED') { stats.inserted++; if (res.collision) stats.collisions++; put(rowNumber, 'IMPORTED', orderRef, '', ''); }
         else if (outcome === 'DUPLICATE') { stats.duplicate++; put(rowNumber, 'DUPLICATE', orderRef, '', ''); }
@@ -173,9 +181,10 @@ function syncLeads_(mode) {
         else { stats.failed++; put(rowNumber, 'ERROR', '', String(res.error || 'Unknown error'), nextRetryState_(byRow[rowNumber] ? byRow[rowNumber].storedHash : '', Date.now())); }
       });
     }
-    stats.mode = mode; stats.at = new Date().toISOString();
-    PropertiesService.getScriptProperties().setProperty('LAST_SYNC', JSON.stringify(stats));
-    console.log('SYNC ' + JSON.stringify(stats));
+    stats.mode = mode; stats.at = new Date().toISOString(); stats.dryRun = dryRun;
+    if (!dryRun) PropertiesService.getScriptProperties().setProperty('LAST_SYNC', JSON.stringify(stats));
+    console.log((dryRun ? 'DRY RUN (nothing written to CODOPS or the sheet) ' : 'SYNC ') + JSON.stringify(stats));
+    if (opts.rows) console.log(report.join('\n'));
   } finally {
     lock.releaseLock();
   }
@@ -186,6 +195,16 @@ function sendNewLeadsToCallCenter() { syncLeads_('normal'); }
 function retryRejectedRowsToCallCenter() { syncLeads_('retryRejected'); }
 // Recovery: re-sends EVERY row. Server is idempotent (stable id / fingerprint), so existing orders are never duplicated or modified.
 function resendAllRowsToCallCenter() { syncLeads_('all'); }
+// ---- Targeted recovery of rows wrongly marked IMPORTED (e.g. during the Oct 31 ID-collision incident) ----
+// 1) put the row numbers below, 2) run recoveryDryRun() and read the log, 3) only then run recoveryApply().
+// The server is idempotent: true duplicates return DUPLICATE, a different lead sharing an Order ID gets its own order, nothing is overwritten.
+const RECOVERY_ROWS = [];
+function runRecovery_(rows, dryRun) {
+  if (!rows || !rows.length) throw new Error('RECOVERY_ROWS is empty');
+  syncLeads_('all', { rows: rows, dryRun: dryRun });
+}
+function recoveryDryRun() { runRecovery_(RECOVERY_ROWS, true); }
+function recoveryApply() { runRecovery_(RECOVERY_ROWS, false); }
 function showLastSync() { console.log(PropertiesService.getScriptProperties().getProperty('LAST_SYNC') || 'No sync recorded yet'); }
 
 function installEveryMinuteTrigger() {

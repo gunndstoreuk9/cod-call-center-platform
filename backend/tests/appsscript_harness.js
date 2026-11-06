@@ -31,7 +31,7 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
     ScriptApp: { getProjectTriggers: () => (global.__triggers || []), newTrigger: () => ({ timeBased: () => ({ everyMinutes: () => ({ create() {} }) }) }), deleteTrigger() {} },
     Logger: { log: s => logs.push(s) }, console: { log: s => logs.push(String(s)) }
   };
-  const fn = new Function(...Object.keys(g), (extraSrc || '') + (srcOverride || src) + '\nreturn {listCallCenterTriggers, sendNewLeadsToCallCenter, retryRejectedRowsToCallCenter, resendAllRowsToCallCenter, diagnoseMissingLeads, shouldSend_};');
+  const fn = new Function(...Object.keys(g), (extraSrc || '') + (srcOverride || src) + '\nreturn {runRecovery_, listCallCenterTriggers, sendNewLeadsToCallCenter, retryRejectedRowsToCallCenter, resendAllRowsToCallCenter, diagnoseMissingLeads, shouldSend_};');
   return { api: fn(...Object.values(g)), logs, fetched, props };
 }
 
@@ -99,6 +99,32 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
   // controlled retry path
   api.retryRejectedRowsToCallCenter();
   assert.deepStrictEqual(fetched[fetched.length - 1].body.orders.map(o => o.row_number), [4]);
+}
+
+// ---------- targeted recovery: dry run writes nothing; apply sends only the listed rows ----------
+{
+  const H = ['Order ID', 'Full Name', 'Phone', 'SKU', 'Product Quantity', 'Total Price', 'CALL CENTER IMPORT STATUS', 'CALL CENTER ORDER ID', 'CALL CENTER IMPORT ERROR', 'CALL CENTER ROW HASH'];
+  const rows = [H,
+    ['1046', 'A', '0611111111', 'SKU1', 1, 100, 'IMPORTED', 'CC-OWNER', '', ''],   // row 2: genuinely imported
+    ['1046', 'B', '0622222222', 'SKU1', 1, 100, 'IMPORTED', 'CC-OWNER', '', ''],   // row 3: falsely IMPORTED (someone else's number)
+    ['1047', 'C', '0633333333', 'SKU1', 2, 200, 'IMPORTED', 'CC-C', '', ''],       // row 4: fine, must NOT be sent
+  ];
+  const sheet = makeSheet('orders', rows);
+  const urls = [];
+  const { api, fetched } = boot({ orders: sheet }, body => ({
+    getResponseCode: () => 200,
+    getContentText: () => JSON.stringify({ results: body.orders.map(o => ({ row_number: o.row_number, status: 'IMPORTED', outcome: urls[urls.length - 1].includes('dry_run') ? 'WOULD_INSERT' : 'INSERTED', collision: true, order_number: urls[urls.length - 1].includes('dry_run') ? '' : 'CC-NEW' })) })
+  }));
+  const origFetch = fetched.push.bind(fetched); fetched.push = (x) => { urls.push(x.url); return origFetch(x); };
+  api.runRecovery_([3], true);
+  assert.strictEqual(fetched.length, 1); assert.ok(fetched[0].url.endsWith('?dry_run=true'));
+  assert.deepStrictEqual(fetched[0].body.orders.map(o => o.row_number), [3], 'only the listed row is sent');
+  assert.strictEqual(sheet.writes.length, 0, 'dry run never writes to the sheet');
+  api.runRecovery_([3], false);
+  assert.ok(!fetched[1].url.includes('dry_run'));
+  assert.strictEqual(sheet.data[2][6], 'IMPORTED'); assert.strictEqual(sheet.data[2][7], 'CC-NEW', 'apply records the new order number');
+  assert.strictEqual(sheet.data[1][7], 'CC-OWNER', 'the original row is untouched');
+  assert.throws(() => api.runRecovery_([], false), /empty/);
 }
 
 // ---------- transient failure: backoff state recorded, no immediate resend, attempts capped ----------
@@ -175,7 +201,7 @@ function boot(sheets, fetchImpl, extraSrc, srcOverride) {
   const pre = "var CALL_CENTER_WEBHOOK = 'https://api.example.com/api/v1/integrations/google-sheets/abcdef12-0000/webhook?token=SUPERSECRETTOKEN';\n";
   // legacy script style: token embedded in the URL (diagnostic code only, so the constants do not clash)
   const diagOnly = src.slice(src.indexOf('/**\n * READ-ONLY diagnostic.'));
-  const { api, logs } = boot({ orders: sheet }, () => { throw new Error('no network'); }, pre, diagOnly.replace(/function sendNew[\s\S]*$/, '') + '\nfunction sendNewLeadsToCallCenter(){}\nfunction retryRejectedRowsToCallCenter(){}\nfunction resendAllRowsToCallCenter(){}\nfunction shouldSend_(){}');
+  const { api, logs } = boot({ orders: sheet }, () => { throw new Error('no network'); }, pre, diagOnly.replace(/function sendNew[\s\S]*$/, '') + '\nfunction sendNewLeadsToCallCenter(){}\nfunction retryRejectedRowsToCallCenter(){}\nfunction resendAllRowsToCallCenter(){}\nfunction shouldSend_(){}\nfunction runRecovery_(){}');
   api.listCallCenterTriggers();
   const o = logs.join('\n');
   assert.ok(o.includes('handler sendNewLeadsToCallCenter') && o.includes('id-hash ' + crypto.createHash('md5').update('SSID').digest('hex').slice(0, 6)));
